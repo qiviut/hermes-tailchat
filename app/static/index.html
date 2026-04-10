@@ -6,22 +6,28 @@
   <title>Hermes Tailchat</title>
   <style>
     body { font-family: system-ui, sans-serif; margin: 0; background: #111827; color: #e5e7eb; }
-    .wrap { display: grid; grid-template-columns: 280px 1fr; height: 100vh; }
+    .wrap { display: grid; grid-template-columns: 300px 1fr; height: 100vh; }
     .sidebar { border-right: 1px solid #374151; padding: 16px; overflow: auto; }
-    .main { display: grid; grid-template-rows: 1fr auto; }
+    .main { display: grid; grid-template-rows: auto 1fr auto; }
+    .topbar { display:flex; justify-content: space-between; gap:12px; padding: 12px 16px; border-bottom: 1px solid #374151; }
     .messages { padding: 16px; overflow: auto; display: flex; flex-direction: column; gap: 12px; }
-    .composer { border-top: 1px solid #374151; padding: 16px; display: flex; gap: 8px; }
+    .composer { border-top: 1px solid #374151; padding: 16px; display: grid; grid-template-columns: 1fr auto auto; gap: 8px; }
     .msg { padding: 10px 12px; border-radius: 12px; max-width: 900px; white-space: pre-wrap; }
     .user { background: #1d4ed8; align-self: flex-end; }
     .assistant { background: #1f2937; align-self: flex-start; }
-    .system { background: #3f3f46; align-self: center; }
-    button, input { font: inherit; }
+    .system { background: #3f3f46; align-self: center; color: #d1d5db; }
+    button, input, textarea { font: inherit; }
     input, textarea { background: #0f172a; color: #e5e7eb; border: 1px solid #374151; border-radius: 8px; padding: 10px; }
-    textarea { flex: 1; min-height: 52px; }
+    textarea { min-height: 52px; }
     button { background: #2563eb; color: white; border: 0; border-radius: 8px; padding: 10px 14px; cursor: pointer; }
+    button.secondary { background: #334155; }
     .chat-item { padding: 10px; border-radius: 8px; cursor: pointer; margin-bottom: 8px; background: #0f172a; }
     .chat-item.active { outline: 2px solid #60a5fa; }
-    .tools { font-size: 12px; color: #93c5fd; }
+    .meta { font-size: 12px; color: #93c5fd; }
+    .section { margin-top: 18px; }
+    .job, .approval { padding: 8px; border: 1px solid #374151; border-radius: 8px; margin-bottom: 8px; background: #0b1220; }
+    .approval button { margin-right: 6px; margin-top: 8px; }
+    .tool-event { color: #93c5fd; font-size: 12px; }
   </style>
 </head>
 <body>
@@ -29,11 +35,28 @@
     <div class="sidebar">
       <button id="newChat">New chat</button>
       <div id="chatList" style="margin-top: 16px"></div>
+      <div class="section">
+        <div class="meta">Background jobs</div>
+        <div id="jobs"></div>
+      </div>
+      <div class="section">
+        <div class="meta">Approvals (groundwork)</div>
+        <div id="approvals"></div>
+      </div>
     </div>
     <div class="main">
+      <div class="topbar">
+        <div>
+          <div style="font-weight:600">Hermes Tailchat</div>
+          <div class="meta">Tailnet-only MVP. Auth intentionally skipped for now.</div>
+        </div>
+        <div id="status" class="meta">idle</div>
+      </div>
       <div id="messages" class="messages"></div>
       <div class="composer">
-        <textarea id="input" placeholder="Send a message to Hermes..."></textarea>
+        <textarea id="input" placeholder="Send a message to Hermes...
+Ctrl/Cmd+Enter to send. Shift+Ctrl/Cmd+Enter to queue as a background job."></textarea>
+        <button id="background" class="secondary">Queue job</button>
         <button id="send">Send</button>
       </div>
     </div>
@@ -43,6 +66,11 @@ let currentChat = null;
 let eventSource = null;
 const messagesEl = document.getElementById('messages');
 const chatListEl = document.getElementById('chatList');
+const jobsEl = document.getElementById('jobs');
+const approvalsEl = document.getElementById('approvals');
+const statusEl = document.getElementById('status');
+
+function setStatus(text) { statusEl.textContent = text; }
 
 function renderMessages(messages) {
   messagesEl.innerHTML = '';
@@ -55,10 +83,18 @@ function upsertMessage(msg) {
   if (!el) {
     el = document.createElement('div');
     el.id = 'msg-' + msg.id;
-    el.className = 'msg ' + (msg.role === 'user' ? 'user' : 'assistant');
+    el.className = 'msg ' + (msg.role === 'user' ? 'user' : msg.role === 'system' ? 'system' : 'assistant');
     messagesEl.appendChild(el);
   }
   el.textContent = msg.content || (msg.status === 'queued' ? '…' : '');
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function appendToolEvent(text) {
+  const el = document.createElement('div');
+  el.className = 'tool-event';
+  el.textContent = text;
+  messagesEl.appendChild(el);
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
@@ -69,11 +105,51 @@ async function loadChats() {
   for (const chat of chats) {
     const div = document.createElement('div');
     div.className = 'chat-item' + (chat.id === currentChat ? ' active' : '');
-    div.textContent = chat.title;
+    div.innerHTML = `<div>${chat.title}</div><div class="meta">${chat.last_activity_at || chat.created_at}</div>`;
     div.onclick = () => openChat(chat.id);
     chatListEl.appendChild(div);
   }
   if (!currentChat && chats.length) openChat(chats[0].id);
+}
+
+async function loadJobs() {
+  if (!currentChat) return;
+  const res = await fetch(`/api/conversations/${currentChat}/jobs`);
+  const jobs = await res.json();
+  jobsEl.innerHTML = jobs.map(job => `<div class="job"><div>${job.prompt}</div><div class="meta">${job.status} · run_after ${job.run_after}</div></div>`).join('') || '<div class="meta">No jobs yet</div>';
+}
+
+async function loadApprovals() {
+  if (!currentChat) return;
+  const res = await fetch(`/api/conversations/${currentChat}/approvals`);
+  const approvals = await res.json();
+  approvalsEl.innerHTML = '';
+  if (!approvals.length) {
+    approvalsEl.innerHTML = '<div class="meta">No approvals observed yet</div>';
+    return;
+  }
+  for (const approval of approvals) {
+    const div = document.createElement('div');
+    div.className = 'approval';
+    div.innerHTML = `<div>${approval.summary}</div><div class="meta">${approval.status}</div>`;
+    if (approval.status === 'pending') {
+      const approve = document.createElement('button');
+      approve.textContent = 'Approve';
+      approve.onclick = () => resolveApproval(approval.id, 'approved');
+      const deny = document.createElement('button');
+      deny.textContent = 'Deny';
+      deny.className = 'secondary';
+      deny.onclick = () => resolveApproval(approval.id, 'denied');
+      div.appendChild(approve);
+      div.appendChild(deny);
+    }
+    approvalsEl.appendChild(div);
+  }
+}
+
+async function resolveApproval(id, resolution) {
+  await fetch(`/api/approvals/${id}/resolve`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({resolution})});
+  await loadApprovals();
 }
 
 async function openChat(id) {
@@ -82,19 +158,41 @@ async function openChat(id) {
   const res = await fetch(`/api/conversations/${id}/messages`);
   const messages = await res.json();
   renderMessages(messages);
+  await loadJobs();
+  await loadApprovals();
   if (eventSource) eventSource.close();
   eventSource = new EventSource(`/api/conversations/${id}/events`);
-  eventSource.onmessage = (ev) => {
+  eventSource.onmessage = async (ev) => {
     const event = JSON.parse(ev.data);
     if (event.event === 'message.created') upsertMessage(event.message);
     if (event.event === 'message.delta') {
       const el = document.getElementById('msg-' + event.message_id);
       if (el) el.textContent = (el.textContent || '') + (event.delta || '');
+      setStatus('streaming');
     }
     if (event.event === 'message.completed') {
       const el = document.getElementById('msg-' + event.message_id);
       if (el) el.textContent = event.content || '';
+      setStatus('idle');
+      await loadJobs();
     }
+    if (event.event === 'message.error') {
+      const el = document.getElementById('msg-' + event.message_id);
+      if (el) el.textContent = '[error] ' + event.error;
+      setStatus('error');
+      await loadJobs();
+    }
+    if (event.event === 'job.queued' || event.event === 'job.started') {
+      await loadJobs();
+      appendToolEvent(`${event.event}: ${(event.job && event.job.prompt) || ''}`);
+    }
+    if (event.event === 'approval.created' || event.event === 'approval.resolved') {
+      await loadApprovals();
+      appendToolEvent(event.event);
+    }
+    if (event.event === 'tool.started') appendToolEvent(`tool started: ${event.tool}${event.preview ? ' — ' + event.preview : ''}`);
+    if (event.event === 'tool.completed') appendToolEvent(`tool completed: ${event.tool}${event.error ? ' (error)' : ''}`);
+    if (event.event === 'reasoning.available') appendToolEvent(`reasoning available`);
   };
 }
 
@@ -105,19 +203,35 @@ async function newChat() {
   await openChat(chat.id);
 }
 
-async function sendMessage() {
+async function sendMessage(background = false) {
   if (!currentChat) await newChat();
   const input = document.getElementById('input');
   const content = input.value.trim();
   if (!content) return;
   input.value = '';
+  setStatus(background ? 'job queued' : 'running');
+  if (background) {
+    await fetch(`/api/conversations/${currentChat}/jobs`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({prompt: content, delay_seconds: 0})});
+    await loadJobs();
+    return;
+  }
   await fetch(`/api/conversations/${currentChat}/messages`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({content})});
 }
 
 document.getElementById('newChat').onclick = newChat;
-document.getElementById('send').onclick = sendMessage;
-document.getElementById('input').addEventListener('keydown', (e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') sendMessage(); });
-loadChats().then(async () => { const res = await fetch('/api/conversations'); const chats = await res.json(); if (!chats.length) await newChat(); });
+document.getElementById('send').onclick = () => sendMessage(false);
+document.getElementById('background').onclick = () => sendMessage(true);
+document.getElementById('input').addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+    e.preventDefault();
+    sendMessage(!!e.shiftKey);
+  }
+});
+loadChats().then(async () => {
+  const res = await fetch('/api/conversations');
+  const chats = await res.json();
+  if (!chats.length) await newChat();
+});
 </script>
 </body>
 </html>
