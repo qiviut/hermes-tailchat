@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .venv/
 .env
-.db
+*.db
 *.db-shm
 *.db-wal
+*.egg-info/
