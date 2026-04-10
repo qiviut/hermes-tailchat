@@ -1,5 +1,0 @@
-fastapi<1,>=0.116
-uvicorn[standard]<1,>=0.35
-httpx<1,>=0.28
-sse-starlette<3,>=2.1
-pydantic<3,>=2.11
