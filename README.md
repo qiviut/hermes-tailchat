@@ -176,6 +176,40 @@ Smoke test prompt:
 - send `Reply with exactly: tailchat smoke test ok`
 - expect `tailchat smoke test ok`
 
+## Fast shipping workflow
+
+Recommended short-loop flow for this repo:
+
+1. work on a feature branch
+2. commit small, reviewable slices
+3. push the branch
+4. create a PR immediately
+5. merge quickly once review/criteria are satisfied
+
+A helper script is included:
+
+```bash
+scripts/ship-pr.sh
+```
+
+That script:
+- refuses to run from `main`
+- refuses to run with a dirty worktree
+- creates a PR for the current branch if one does not exist
+- prints review/check status
+
+Optional modes:
+
+```bash
+scripts/ship-pr.sh --arm-auto
+scripts/ship-pr.sh --merge-now
+```
+
+Notes:
+- `--arm-auto` enables GitHub auto-merge using squash merge.
+- `--merge-now` merges immediately using squash merge.
+- if the repository lacks required review/check protections, these modes may merge immediately, so add GitHub protections before relying on them as policy.
+
 ## Suggested next steps
 
 Near-term roadmap themes:
