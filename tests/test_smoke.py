@@ -3,15 +3,37 @@ from __future__ import annotations
 import importlib
 import os
 import sys
+import types
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+
+
+class DummyHermesProviderError(RuntimeError):
+    pass
+
+
+class DummyLocalHermesProvider:
+    async def run_turn(self, session_id, conversation_history, user_message, on_event):
+        await on_event({"event": "run.completed", "output": f"dummy response for: {user_message}"})
+
+    async def resolve_approval(self, approval_id, decision):
+        return {
+            "approval_id": approval_id,
+            "decision": decision,
+            "resolved_count": 1,
+        }
 
 
 def load_app(tmp_path: Path):
     db_path = tmp_path / "tailchat-test.db"
     os.environ["TAILCHAT_DB_PATH"] = str(db_path)
     os.environ.setdefault("HERMES_API_KEY", "test-key")
+
+    stub = types.ModuleType("app.hermes_provider")
+    stub.HermesProviderError = DummyHermesProviderError
+    stub.LocalHermesProvider = DummyLocalHermesProvider
+    sys.modules["app.hermes_provider"] = stub
 
     for name in ["app.config", "app.store", "app.main"]:
         sys.modules.pop(name, None)
