@@ -192,6 +192,9 @@ A helper script is included:
 scripts/ship-pr.sh
 ```
 
+Policy reference:
+- `docs/policies/branch-protection-and-pr-flow.md`
+
 That script:
 - refuses to run from `main`
 - refuses to run with a dirty worktree
