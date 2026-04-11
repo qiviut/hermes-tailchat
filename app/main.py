@@ -36,6 +36,23 @@ class ApprovalResolve(BaseModel):
     resolution: str
 
 
+class StripHermesPrefixMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get('type') in {'http', 'websocket'}:
+            path = scope.get('path', '')
+            if path == '/hermes' or path.startswith('/hermes/'):
+                new_scope = dict(scope)
+                stripped = path[len('/hermes'):]
+                new_scope['path'] = stripped or '/'
+                root_path = scope.get('root_path', '')
+                new_scope['root_path'] = f'{root_path}/hermes' if root_path else '/hermes'
+                scope = new_scope
+        await self.app(scope, receive, send)
+
+
 store = Store(DB_PATH)
 store_module.store = store
 hermes = LocalHermesProvider()
@@ -59,6 +76,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=APP_TITLE, lifespan=lifespan)
+app.add_middleware(StripHermesPrefixMiddleware)
 static_dir = Path(__file__).resolve().parent / 'static'
 app.mount('/static', StaticFiles(directory=static_dir), name='static')
 
