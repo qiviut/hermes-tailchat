@@ -13,8 +13,8 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from .broker import broker
-from .config import APP_TITLE, DB_PATH, HERMES_API_BASE_URL, HERMES_API_KEY
-from .hermes_api import HermesAPIError, HermesClient
+from .config import APP_TITLE, DB_PATH
+from .hermes_provider import HermesProviderError, LocalHermesProvider
 from .store import Store
 import app.store as store_module
 
@@ -38,7 +38,7 @@ class ApprovalResolve(BaseModel):
 
 store = Store(DB_PATH)
 store_module.store = store
-hermes = HermesClient(HERMES_API_BASE_URL, HERMES_API_KEY)
+hermes = LocalHermesProvider()
 worker_id = f"tailchat-{socket.gethostname()}-{Path(DB_PATH).name}"
 poll_task: asyncio.Task | None = None
 
@@ -68,19 +68,12 @@ async def publish(conversation_id: str, event: dict, run_id: str | None = None):
     await broker.publish(conversation_id, event)
 
 
-def approval_summary_for_event(event: dict) -> tuple[str, dict] | None:
-    kind = event.get('event', '')
-    if kind in {'approval.requested', 'approval_requested', 'approval.required'}:
-        return ('Hermes requested approval', event)
-    return None
-
-
 async def run_turn(conversation_id: str, assistant_message_id: str, user_message: str, run_id: str, job_id: str | None = None) -> None:
     messages = store.get_messages(conversation_id)
     history = [
         {'role': m['role'], 'content': m['content']}
         for m in messages
-        if m['id'] != assistant_message_id and m['status'] != 'queued'
+        if m['id'] != assistant_message_id and m['status'] != 'queued' and m['role'] in {'user', 'assistant', 'system'}
     ]
     conversation_history = history[:-1] if history else []
     buffer = ''
@@ -91,16 +84,24 @@ async def run_turn(conversation_id: str, assistant_message_id: str, user_message
     async def on_event(event: dict):
         nonlocal buffer
         kind = event.get('event', 'unknown')
-        approval_info = approval_summary_for_event(event)
-        if approval_info:
-            summary, details = approval_info
-            approval = store.create_approval(conversation_id, summary, details, run_id=run_id)
-            await publish(conversation_id, {'event': 'approval.created', 'approval': approval}, run_id=run_id)
-            return
         if kind == 'message.delta':
             buffer += event.get('delta', '')
             store.update_message(assistant_message_id, buffer, status='streaming')
             await publish(conversation_id, {'event': 'message.delta', 'message_id': assistant_message_id, 'delta': event.get('delta', '')}, run_id=run_id)
+            return
+        if kind == 'approval.requested':
+            data = event.get('approval', {})
+            approval = store.create_approval(
+                conversation_id,
+                summary=data.get('description', 'Dangerous command requires approval'),
+                details=data,
+                run_id=run_id,
+            )
+            await publish(conversation_id, {'event': 'approval.created', 'approval': approval, 'run_id': run_id}, run_id=run_id)
+            return
+        if kind == 'approval.waiting':
+            store.update_run(run_id, status='waiting_approval')
+            await publish(conversation_id, {'event': 'approval.waiting', 'run_id': run_id}, run_id=run_id)
             return
         if kind == 'run.completed':
             output = event.get('output', '')
@@ -123,9 +124,9 @@ async def run_turn(conversation_id: str, assistant_message_id: str, user_message
 
     try:
         await hermes.run_turn(conversation_id, conversation_history, user_message, on_event)
-    except HermesAPIError as exc:
+    except HermesProviderError as exc:
         err = str(exc)
-        store.update_message(assistant_message_id, f'[Hermes API error] {err}', status='error')
+        store.update_message(assistant_message_id, f'[Hermes provider error] {err}', status='error')
         store.update_run(run_id, status='error', error_text=err)
         if job_id:
             store.update_job(job_id, status='error', error_text=err, result_message_id=assistant_message_id)
@@ -176,7 +177,7 @@ async def index():
 
 @app.get('/health')
 async def health():
-    return {'ok': True, 'db_path': str(DB_PATH), 'hermes_api_base_url': HERMES_API_BASE_URL, 'worker_id': worker_id}
+    return {'ok': True, 'db_path': str(DB_PATH), 'worker_id': worker_id, 'provider': 'local-hermes'}
 
 
 @app.get('/api/conversations')
@@ -246,11 +247,24 @@ async def create_job(conversation_id: str, body: JobCreate):
 
 @app.post('/api/approvals/{approval_id}/resolve')
 async def resolve_approval(approval_id: str, body: ApprovalResolve):
-    item = store.resolve_approval(approval_id, body.resolution)
-    if not item:
+    approvals = []
+    # find approval by scanning known approvals in DB via current conversations
+    for conversation in store.list_conversations():
+        for item in store.list_approvals(conversation['id']):
+            if item['id'] == approval_id:
+                approvals.append(item)
+                break
+    if not approvals:
         raise HTTPException(status_code=404, detail='approval not found')
-    await publish(item['conversation_id'], {'event': 'approval.resolved', 'approval': item}, run_id=item.get('run_id'))
-    return item
+    item = approvals[0]
+    details = item.get('details', {})
+    provider_approval_id = details.get('approval_id', approval_id)
+    provider_result = await hermes.resolve_approval(provider_approval_id, body.resolution)
+    resolved = store.resolve_approval(approval_id, body.resolution)
+    if not resolved:
+        raise HTTPException(status_code=404, detail='approval not found after provider resolve')
+    await publish(resolved['conversation_id'], {'event': 'approval.resolved', 'approval': resolved, 'provider_result': provider_result, 'session_id': details.get('session_id')}, run_id=resolved.get('run_id'))
+    return resolved
 
 
 @app.get('/api/conversations/{conversation_id}/events')
