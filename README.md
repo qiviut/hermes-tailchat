@@ -7,64 +7,179 @@ Current MVP:
 - SQLite persistence
 - SSE live updates
 - Static single-page chat UI
-- Hermes integration through the local Hermes API server (`/v1/runs`)
+- Local Hermes integration via `app/hermes_provider.py`
+- Tailscale Serve-friendly routing, including subpath hosting at `/hermes`
 
 Current assumptions:
-- The app binds to localhost
-- Exposure to other devices should happen via Tailscale (`tailscale serve`)
-- Hermes API server also binds to localhost and is protected by a bearer token
+- this is a single-user personal tool optimized for fast iteration
+- the app binds to localhost
+- exposure to other devices happens through Tailscale Serve
+- Hermes itself stays local to the machine
 
 ## Architecture
 
 See `docs/architecture.md`.
 
-## MVP features
+## What works today
 
-- Create conversations
-- Send messages
-- Stream Hermes deltas, tool events, and final responses into the UI
-- Keep a persistent local transcript
-- Let Hermes work asynchronously in the background after the HTTP request returns
+- create conversations
+- send messages
+- stream Hermes deltas, tool events, and final responses into the UI
+- persist local transcript state in SQLite
+- queue background jobs that continue server-side after the HTTP request returns
+- run behind Tailscale Serve at either `/` or a subpath such as `/hermes`
 
-## Not done yet
+## Current gaps
 
-- Tailscale identity auth
-- Structured approval prompts bridged from Hermes
-- Persistent worker queue
-- Multi-user permissions
-- Attachment upload
-- Robust reconnect/replay by event cursor
+- no mobile-focused offline/resume UX yet
+- no Tailscale identity auth or app auth yet
+- no comprehensive automated tests yet
+- no CI, dependency update automation, or SAST yet
+- no polished deployment packaging beyond a local user systemd service
 
-## Local run
+## Repo safety / secrets
 
-1. Create a venv and install deps
-2. Start Hermes gateway with API server enabled on localhost
-3. Start this app
-4. Optionally expose it with `tailscale serve`
+Do not commit real secrets.
 
-Example:
+Safe patterns:
+- keep `HERMES_API_KEY` outside git in the environment or a host-local env file
+- keep `tailchat.db` local only
+- keep systemd service files with real secrets outside the repo, or use `EnvironmentFile=` pointing at an ignored file
+
+Ignored by git already:
+- `.env`
+- `.venv/`
+- `*.db`
+- `*.db-shm`
+- `*.db-wal`
+
+## Configuration
+
+Environment variables used by the app:
+- `HERMES_API_BASE_URL` default: `http://127.0.0.1:8642`
+- `HERMES_API_KEY`
+- `TAILCHAT_DB_PATH` default: `./tailchat.db`
+
+Example local env file:
+
+```bash
+cp .env.example .env
+# then edit .env locally with your real values
+```
+
+## Local development run
+
+Requirements:
+- Python 3.11+
+- a working Hermes installation on the same machine
+- Hermes credentials configured locally
+
+Create a venv and install deps:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-uvicorn app.main:app --host 127.0.0.1 --port 8765 --reload
+```
+
+Run Tailchat directly:
+
+```bash
+export HERMES_API_KEY=replace-me
+uvicorn app.main:app --host 127.0.0.1 --port 8766 --reload
 ```
 
 Then open:
-- `http://127.0.0.1:8765` locally
-- or a tailnet URL once `tailscale serve` is configured
+- `http://127.0.0.1:8766` locally
 
-## Hermes API server env
+If you want to test subpath hosting locally, these also work because the app strips the `/hermes` prefix:
+- `http://127.0.0.1:8766/hermes`
+- `http://127.0.0.1:8766/hermes/`
 
-The backend expects:
-- `HERMES_API_BASE_URL` default: `http://127.0.0.1:8642`
-- `HERMES_API_KEY`
-- `TAILCHAT_DB_PATH` default: `./tailchat.db`
+## Persistent local service
+
+A practical single-user setup is a user systemd service that binds Tailchat to localhost.
+
+Example unit:
+
+```ini
+[Unit]
+Description=Hermes Tailchat
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.openclaw/workspace/hermes-tailchat
+Environment=PYTHONPATH=%h/.openclaw/workspace/hermes-tailchat
+EnvironmentFile=%h/.config/hermes-tailchat.env
+ExecStart=%h/.hermes/hermes-agent/venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8766
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+Example env file referenced by `EnvironmentFile=`:
+
+```bash
+HERMES_API_KEY=replace-me
+# optional overrides
+# HERMES_API_BASE_URL=http://127.0.0.1:8642
+# TAILCHAT_DB_PATH=/path/to/tailchat.db
+```
+
+Then:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now hermes-tailchat.service
+systemctl --user status hermes-tailchat.service
+```
+
+## Tailscale Serve
+
+Recommended pattern:
+- keep OpenClaw or other control UI on `/`
+- expose Tailchat on `/hermes`
+- keep both backends bound to localhost only
+
+Example:
+
+```bash
+tailscale serve --bg http://127.0.0.1:18789
+tailscale serve --bg --set-path /hermes http://127.0.0.1:8766
+```
+
+With that in place, the app is reachable at:
+- `https://YOUR-NODE.ts.net/hermes`
+
+The frontend is prefix-aware, and the backend strips `/hermes`, so subpath hosting works without a separate reverse proxy.
+
+## Quick verification
+
+Local health checks:
+
+```bash
+curl http://127.0.0.1:8766/health
+curl http://127.0.0.1:8766/hermes/api/conversations
+```
+
+Tailnet verification:
+
+```bash
+tailscale serve status
+```
+
+Smoke test prompt:
+- send `Reply with exactly: tailchat smoke test ok`
+- expect `tailchat smoke test ok`
 
 ## Suggested next steps
 
-- Add Tailscale auth headers or serve-based access control
-- Add approval workflow plumbing
-- Add persistent job queue and scheduled/server-initiated messages
-- Add tests and packaging
+Near-term roadmap themes:
+- mobile-friendly UX and reconnect behavior
+- better background-job visibility and resumability
+- project hygiene: tests, CI, Dependabot, SAST
+- lightweight hardening without slowing down iteration

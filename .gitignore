@@ -6,3 +6,6 @@ __pycache__/
 *.db-shm
 *.db-wal
 *.egg-info/
+
+# bv (beads viewer) local config and caches
+.bv/
