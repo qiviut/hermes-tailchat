@@ -27,6 +27,11 @@ class ConversationUpdate(BaseModel):
     title: str = Field(min_length=1)
 
 
+class ConversationAttach(BaseModel):
+    hermes_session_id: str = Field(min_length=1)
+    title: str | None = None
+
+
 class MessageCreate(BaseModel):
     content: str
 
@@ -91,6 +96,8 @@ async def publish(conversation_id: str, event: dict, run_id: str | None = None):
 
 
 async def run_turn(conversation_id: str, assistant_message_id: str, user_message: str, run_id: str, job_id: str | None = None) -> None:
+    conversation = store.get_conversation(conversation_id)
+    hermes_session_id = (conversation or {}).get('hermes_session_id') or conversation_id
     messages = store.get_messages(conversation_id)
     history = [
         {'role': m['role'], 'content': m['content']}
@@ -145,7 +152,7 @@ async def run_turn(conversation_id: str, assistant_message_id: str, user_message
         await publish(conversation_id, dict(event, run_id=run_id, job_id=job_id), run_id=run_id)
 
     try:
-        await hermes.run_turn(conversation_id, conversation_history, user_message, on_event)
+        await hermes.run_turn(hermes_session_id, conversation_history, user_message, on_event)
     except HermesProviderError as exc:
         err = str(exc)
         store.update_message(assistant_message_id, f'[Hermes provider error] {err}', status='error')
@@ -225,6 +232,28 @@ async def create_conversation(body: ConversationCreate):
         except HermesProviderError as exc:
             conversation = store.update_conversation_sync(conversation['id'], sync_state='sync_error', sync_error=str(exc))
     return conversation
+
+
+@app.get('/api/hermes/sessions')
+async def list_hermes_sessions(limit: int = 20):
+    sessions = await hermes.list_sessions(limit=limit)
+    attached_ids = {item['hermes_session_id'] for item in store.list_conversations() if item.get('hermes_session_id')}
+    for item in sessions:
+        item['already_attached'] = item.get('id') in attached_ids
+    return sessions
+
+
+@app.post('/api/conversations/attach')
+async def attach_conversation(body: ConversationAttach):
+    existing = store.get_conversation_by_hermes_session_id(body.hermes_session_id)
+    if existing:
+        raise HTTPException(status_code=409, detail=f"Hermes session already attached to conversation {existing['id']}")
+    session = await hermes.get_session(body.hermes_session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail='Hermes session not found')
+    hermes_title = await hermes.get_session_title(body.hermes_session_id)
+    display_title = body.title or hermes_title or f"Attached {body.hermes_session_id[:12]}"
+    return store.attach_conversation(body.hermes_session_id, display_title, hermes_title=hermes_title)
 
 
 @app.patch('/api/conversations/{conversation_id}')
