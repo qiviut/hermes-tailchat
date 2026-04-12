@@ -148,3 +148,11 @@ def test_attach_session_picker_mobile_layout_rules_are_present() -> None:
     assert '.attach-list {' in css
     assert '.attach-actions {' in css
     assert 'grid-template-columns: 1fr 1fr;' in css
+
+
+def test_attach_session_picker_handles_load_failures() -> None:
+    html = INDEX_HTML.read_text()
+
+    assert "if (!res.ok || !Array.isArray(payload))" in html
+    assert "attachStatusEl.textContent = payload.detail || 'Failed to load Hermes sessions.';" in html
+    assert "Failed to load Hermes sessions:" in html
