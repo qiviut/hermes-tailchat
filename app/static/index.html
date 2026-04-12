@@ -130,6 +130,45 @@
       font-size: 12px;
       overflow-wrap: anywhere;
     }
+    .attach-panel {
+      margin-top: 12px;
+      padding: 12px;
+      border: 1px solid #374151;
+      border-radius: 10px;
+      background: #0b1220;
+      display: none;
+      gap: 10px;
+    }
+    .attach-panel.open {
+      display: grid;
+    }
+    .attach-list {
+      display: grid;
+      gap: 8px;
+      max-height: 240px;
+      overflow: auto;
+    }
+    .attach-session {
+      padding: 10px;
+      border: 1px solid #374151;
+      border-radius: 8px;
+      background: #0f172a;
+      cursor: pointer;
+      text-align: left;
+    }
+    .attach-session.active {
+      border-color: #60a5fa;
+      outline: 1px solid #60a5fa;
+    }
+    .attach-session:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .attach-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
 
     @media (max-width: 900px) {
       .wrap {
@@ -217,6 +256,16 @@
     <div class="sidebar">
       <button id="newChat">New chat</button>
       <button id="attachChat" class="secondary" style="margin-top: 8px">Attach Hermes session</button>
+      <div id="attachPanel" class="attach-panel" aria-live="polite">
+        <div class="meta">Attach an existing Hermes session without reusing the local Tailchat conversation ID.</div>
+        <input id="attachTitleOverride" placeholder="Optional Tailchat title override" />
+        <div id="attachList" class="attach-list"></div>
+        <div id="attachStatus" class="meta">Choose a Hermes session to attach.</div>
+        <div class="attach-actions">
+          <button id="confirmAttach">Attach selected session</button>
+          <button id="cancelAttach" class="secondary">Cancel</button>
+        </div>
+      </div>
       <div id="chatList" style="margin-top: 16px"></div>
       <div class="section">
         <div class="meta">Background jobs</div>
@@ -256,6 +305,12 @@ const jobsEl = document.getElementById('jobs');
 const approvalsEl = document.getElementById('approvals');
 const statusEl = document.getElementById('status');
 const sessionMetaEl = document.getElementById('sessionMeta');
+const attachPanelEl = document.getElementById('attachPanel');
+const attachListEl = document.getElementById('attachList');
+const attachStatusEl = document.getElementById('attachStatus');
+const attachTitleOverrideEl = document.getElementById('attachTitleOverride');
+let attachableSessions = [];
+let selectedAttachSessionId = null;
 const basePath = (() => {
   const path = window.location.pathname;
   return path.startsWith('/hermes') ? '/hermes' : '';
@@ -303,6 +358,71 @@ function appendToolEvent(text) {
   el.textContent = text;
   messagesEl.appendChild(el);
   messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function renderAttachSessions() {
+  attachListEl.innerHTML = '';
+  if (!attachableSessions.length) {
+    attachStatusEl.textContent = 'No unattached Hermes sessions found.';
+    return;
+  }
+  attachStatusEl.textContent = selectedAttachSessionId ? `Selected ${selectedAttachSessionId}` : 'Choose a Hermes session to attach.';
+  for (const session of attachableSessions) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'attach-session' + (session.id === selectedAttachSessionId ? ' active' : '');
+    button.innerHTML = `<div>${session.title || 'Untitled session'}</div><div class="meta">${session.id}</div><div class="meta">${session.preview || session.source || 'No preview available'}</div>`;
+    button.onclick = () => {
+      selectedAttachSessionId = session.id;
+      renderAttachSessions();
+    };
+    attachListEl.appendChild(button);
+  }
+}
+
+async function openAttachPanel() {
+  attachPanelEl.classList.add('open');
+  attachStatusEl.textContent = 'Loading Hermes sessions…';
+  attachListEl.innerHTML = '';
+  selectedAttachSessionId = null;
+  const res = await fetch(apiUrl('/api/hermes/sessions?limit=20'));
+  const sessions = await res.json();
+  attachableSessions = sessions.filter(session => !session.already_attached);
+  renderAttachSessions();
+}
+
+function closeAttachPanel() {
+  attachPanelEl.classList.remove('open');
+  attachableSessions = [];
+  selectedAttachSessionId = null;
+  attachTitleOverrideEl.value = '';
+  attachListEl.innerHTML = '';
+  attachStatusEl.textContent = 'Choose a Hermes session to attach.';
+}
+
+async function confirmAttach() {
+  if (!selectedAttachSessionId) {
+    attachStatusEl.textContent = 'Choose a Hermes session before attaching.';
+    return;
+  }
+  attachStatusEl.textContent = `Attaching ${selectedAttachSessionId}…`;
+  const attach = await fetch(apiUrl('/api/conversations/attach'), {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      hermes_session_id: selectedAttachSessionId,
+      title: attachTitleOverrideEl.value.trim() || null,
+    })
+  });
+  if (!attach.ok) {
+    const error = await attach.json().catch(() => ({}));
+    attachStatusEl.textContent = error.detail || 'Failed to attach Hermes session';
+    return;
+  }
+  const chat = await attach.json();
+  closeAttachPanel();
+  await loadChats();
+  await openChat(chat.id);
 }
 
 async function loadChats() {
@@ -412,33 +532,6 @@ async function newChat() {
   await openChat(chat.id);
 }
 
-async function attachChat() {
-  const res = await fetch(apiUrl('/api/hermes/sessions?limit=10'));
-  const sessions = await res.json();
-  const available = sessions.filter(session => !session.already_attached);
-  if (!available.length) {
-    window.alert('No unattached Hermes sessions found.');
-    return;
-  }
-  const summary = available.map(session => `${session.id} — ${session.title || session.preview || session.source || 'untitled'}`).join('\n');
-  const sessionId = window.prompt(`Attach which Hermes session?\n\n${summary}`);
-  if (!sessionId) return;
-  const title = window.prompt('Optional Tailchat title override (leave blank to use Hermes title):', '');
-  const attach = await fetch(apiUrl('/api/conversations/attach'), {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({hermes_session_id: sessionId.trim(), title: title.trim() || null})
-  });
-  if (!attach.ok) {
-    const error = await attach.json().catch(() => ({}));
-    window.alert(error.detail || 'Failed to attach Hermes session');
-    return;
-  }
-  const chat = await attach.json();
-  await loadChats();
-  await openChat(chat.id);
-}
-
 async function sendMessage(background = false) {
   if (!currentChat) await newChat();
   const input = document.getElementById('input');
@@ -455,7 +548,9 @@ async function sendMessage(background = false) {
 }
 
 document.getElementById('newChat').onclick = newChat;
-document.getElementById('attachChat').onclick = attachChat;
+document.getElementById('attachChat').onclick = openAttachPanel;
+document.getElementById('confirmAttach').onclick = confirmAttach;
+document.getElementById('cancelAttach').onclick = closeAttachPanel;
 document.getElementById('send').onclick = () => sendMessage(false);
 document.getElementById('background').onclick = () => sendMessage(true);
 document.getElementById('input').addEventListener('keydown', (e) => {
