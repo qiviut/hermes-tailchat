@@ -104,6 +104,22 @@ class LocalHermesProvider:
         else:
             await on_event({'event': 'run.failed', 'error': 'No response generated'})
 
+    async def set_session_title(self, session_id: str, title: str) -> str | None:
+        loop = asyncio.get_running_loop()
+
+        def run_sync() -> str | None:
+            try:
+                self._session_db.set_session_title(session_id, title)
+            except ValueError as exc:
+                raise HermesProviderError(str(exc)) from exc
+            return self._session_db.get_session_title(session_id)
+
+        return await loop.run_in_executor(None, run_sync)
+
+    async def get_session_title(self, session_id: str) -> str | None:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._session_db.get_session_title, session_id)
+
     async def _register_approval(self, session_id: str, approval_data: dict, on_event: EventHandler) -> None:
         import uuid
         approval_id = uuid.uuid4().hex

@@ -23,6 +23,10 @@ class ConversationCreate(BaseModel):
     title: str | None = None
 
 
+class ConversationUpdate(BaseModel):
+    title: str = Field(min_length=1)
+
+
 class MessageCreate(BaseModel):
     content: str
 
@@ -211,7 +215,31 @@ async def list_conversations():
 
 @app.post('/api/conversations')
 async def create_conversation(body: ConversationCreate):
-    return store.create_conversation(body.title)
+    conversation = store.create_conversation(body.title)
+    title = conversation.get('title')
+    session_id = conversation.get('hermes_session_id')
+    if title and session_id:
+        try:
+            hermes_title = await hermes.set_session_title(session_id, title)
+            conversation = store.update_conversation_sync(conversation['id'], hermes_title=hermes_title, sync_state='linked', sync_error=None)
+        except HermesProviderError as exc:
+            conversation = store.update_conversation_sync(conversation['id'], sync_state='sync_error', sync_error=str(exc))
+    return conversation
+
+
+@app.patch('/api/conversations/{conversation_id}')
+async def update_conversation(conversation_id: str, body: ConversationUpdate):
+    if not store.conversation_exists(conversation_id):
+        raise HTTPException(status_code=404, detail='conversation not found')
+    conversation = store.update_conversation_title(conversation_id, body.title)
+    session_id = conversation.get('hermes_session_id')
+    if session_id:
+        try:
+            hermes_title = await hermes.set_session_title(session_id, body.title)
+            conversation = store.update_conversation_sync(conversation_id, hermes_title=hermes_title, sync_state='linked', sync_error=None)
+        except HermesProviderError as exc:
+            conversation = store.update_conversation_sync(conversation_id, sync_state='sync_error', sync_error=str(exc))
+    return conversation
 
 
 @app.get('/api/conversations/{conversation_id}/messages')
