@@ -125,3 +125,26 @@ def test_mobile_landscape_layout_rules_are_present() -> None:
     assert "border-bottom: 0;" in landscape_block
     assert "grid-template-columns: minmax(0, 1fr) auto auto;" in landscape_block
     assert "grid-column: auto;" in landscape_block
+
+
+def test_attach_session_picker_ui_is_present() -> None:
+    html = INDEX_HTML.read_text()
+
+    assert 'id="attachPanel" class="attach-panel"' in html
+    assert 'id="attachList" class="attach-list"' in html
+    assert 'id="confirmAttach">Attach selected session</button>' in html
+    assert 'id="cancelAttach" class="secondary">Cancel</button>' in html
+    assert 'async function openAttachPanel()' in html
+    assert 'async function confirmAttach()' in html
+    assert 'function closeAttachPanel()' in html
+    assert "window.prompt" not in html
+
+
+def test_attach_session_picker_mobile_layout_rules_are_present() -> None:
+    css = extract_css()
+
+    assert '.attach-panel {' in css
+    assert '.attach-panel.open {' in css
+    assert '.attach-list {' in css
+    assert '.attach-actions {' in css
+    assert 'grid-template-columns: 1fr 1fr;' in css
