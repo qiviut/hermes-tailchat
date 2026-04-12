@@ -106,11 +106,12 @@ def print_section(title: str, ids: list[str], titles: dict[str, str]) -> None:
 def main() -> int:
     rev_range = sys.argv[1] if len(sys.argv) > 1 else "main..HEAD"
     if ".." in rev_range:
-        base, _head = rev_range.split("..", 1)
+        base, head = rev_range.split("..", 1)
     else:
         base = f"{rev_range}^"
+        head = rev_range
     before = parse_issues_at(base)
-    after = parse_current_issues()
+    after = parse_issues_at(head) if head != "HEAD" else parse_current_issues()
     changes = classify_changes(before, after)
     titles = title_map(after | before)
     commits = commits_in_range(rev_range)

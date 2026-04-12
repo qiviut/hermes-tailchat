@@ -74,8 +74,8 @@ build_pr_body() {
   fi
 
   tests_list=$(cat <<'EOF'
-- [x] `python -m py_compile app/*.py tests/*.py`
-- [x] `pytest -q tests/test_smoke.py`
+- [ ] `python -m py_compile app/*.py tests/*.py`
+- [ ] `pytest -q tests/test_smoke.py`
 EOF
 )
 
