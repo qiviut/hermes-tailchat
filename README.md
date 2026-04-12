@@ -20,6 +20,16 @@ Current assumptions:
 
 See `docs/architecture.md`.
 
+## Repository guidance
+
+Repo-specific agent/operator guidance lives in `AGENTS.md`.
+
+Important project docs:
+- `docs/policies/branch-protection-and-pr-flow.md`
+- `docs/policies/traceability.md`
+- `docs/research/`
+
+
 ## What works today
 
 - create conversations
@@ -33,8 +43,8 @@ See `docs/architecture.md`.
 
 - no mobile-focused offline/resume UX yet
 - no Tailscale identity auth or app auth yet
-- no comprehensive automated tests yet
-- no CI, dependency update automation, or SAST yet
+- no comprehensive automated tests beyond the initial smoke suite yet
+- CI exists with trusted-branch quick checks, but dependency update automation, richer SAST, and AI review are still upcoming
 - no polished deployment packaging beyond a local user systemd service
 
 ## Repo safety / secrets
@@ -194,6 +204,7 @@ scripts/ship-pr.sh
 
 Policy reference:
 - `docs/policies/branch-protection-and-pr-flow.md`
+- `docs/policies/traceability.md`
 
 That script:
 - refuses to run from `main`
@@ -212,6 +223,20 @@ Notes:
 - `--arm-auto` enables GitHub auto-merge using squash merge.
 - `--merge-now` merges immediately using squash merge.
 - if the repository lacks required review/check protections, these modes may merge immediately, so add GitHub protections before relying on them as policy.
+
+## Product backlog focus
+
+The backlog is not only about repo/process hardening. It also includes chat-app improvements, especially:
+- mobile-friendly layout and orientation support
+- reconnect/resume behavior for intermittent mobile sessions
+- background-job visibility and resumability
+- real Hermes-backed end-to-end smoke coverage
+
+Current core product epics in beads:
+- `hermes-tailchat-oxf` Improve single-user usability and session resilience
+- `hermes-tailchat-ppb` Strengthen background job visibility and resumability
+- `hermes-tailchat-ipx` Make reconnect and intermittent mobile access resilient
+- `hermes-tailchat-k6t` Add automated smoke coverage for core chat and `/hermes` subpath hosting
 
 ## Suggested next steps
 

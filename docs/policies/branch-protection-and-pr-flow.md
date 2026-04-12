@@ -62,6 +62,41 @@ Do not make the first required check depend on:
 - privileged release workflows
 - untrusted artifact handoff
 
+## Merge strategy for improving security over time
+
+Current default for this repo:
+- short-lived feature branches
+- protected `main`
+- required trusted checks
+- auto-merge after checks pass
+- squash merge by default
+
+Why this is the right current baseline:
+- fast iteration on a single-user project
+- clean `main` history
+- good fit for many small fixup commits
+- easier release-note and traceability grouping once PRs consistently list bead IDs
+
+Security reasoning:
+- squash merge is not itself the main security control
+- the security value comes from protected `main`, trusted CI, traceability, and a gradual increase in validation rigor
+- squash merge reduces history noise, which makes review and forensic reading of `main` easier in practice
+
+How to improve the strategy over time:
+1. keep required checks fast enough that developers do not route around them
+2. add stronger validation as separate checks rather than replacing the fast lane
+3. keep trusted and untrusted execution contexts clearly separated
+4. attach more evidence to PRs and releases (traceability, AI review summaries, later signed attestations)
+5. only add heavier controls when they improve assurance more than they slow shipping
+
+Recommended maturity path:
+- Stage 1: quick-checks only
+- Stage 2: smoke + secret scanning + dependency automation
+- Stage 3: AI review summary check
+- Stage 4: stronger provenance/release attestation and checklist-linked evidence
+
+This repo should get more secure by accumulating better evidence and safer automation, not by making every merge painfully manual.
+
 ## Merge flow
 
 Normal flow:
