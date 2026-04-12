@@ -27,6 +27,10 @@ class Store:
             CREATE TABLE IF NOT EXISTS conversations (
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
+                hermes_session_id TEXT,
+                sync_state TEXT NOT NULL DEFAULT 'linked',
+                link_mode TEXT NOT NULL DEFAULT 'owned',
+                last_hermes_import_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS messages (
@@ -85,6 +89,14 @@ class Store:
             );
             """)
 
+            self._ensure_column(conn, 'conversations', 'hermes_session_id', 'TEXT')
+            self._ensure_column(conn, 'conversations', 'sync_state', "TEXT NOT NULL DEFAULT 'linked'")
+            self._ensure_column(conn, 'conversations', 'link_mode', "TEXT NOT NULL DEFAULT 'owned'")
+            self._ensure_column(conn, 'conversations', 'last_hermes_import_at', 'TEXT')
+            conn.execute("UPDATE conversations SET hermes_session_id = COALESCE(hermes_session_id, id)")
+            conn.execute("UPDATE conversations SET sync_state = COALESCE(NULLIF(sync_state, ''), 'linked')")
+            conn.execute("UPDATE conversations SET link_mode = COALESCE(NULLIF(link_mode, ''), 'owned')")
+
             self._ensure_column(conn, 'messages', 'metadata_json', "TEXT NOT NULL DEFAULT '{}'" )
             self._ensure_column(conn, 'runs', 'job_id', 'TEXT')
             self._ensure_column(conn, 'runs', 'error_text', "TEXT NOT NULL DEFAULT ''")
@@ -97,27 +109,45 @@ class Store:
         if column not in cols:
             conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {ddl}')
 
-    def list_conversations(self) -> list[dict[str, Any]]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT c.id, c.title, c.created_at,
+    def _conversation_select(self) -> str:
+        return """
+                SELECT c.id, c.title, c.hermes_session_id, c.sync_state, c.link_mode, c.last_hermes_import_at, c.created_at,
                        COALESCE(MAX(m.created_at), c.created_at) AS last_activity_at
                 FROM conversations c
                 LEFT JOIN messages m ON m.conversation_id = c.id
-                GROUP BY c.id, c.title, c.created_at
+                GROUP BY c.id, c.title, c.hermes_session_id, c.sync_state, c.link_mode, c.last_hermes_import_at, c.created_at
+                """
+
+    def _conversation_payload(self, row: sqlite3.Row | None) -> dict[str, Any]:
+        if row is None:
+            return {}
+        item = dict(row)
+        hermes_session_id = item.get('hermes_session_id')
+        item['cli_resume_command'] = f'hermes --resume {hermes_session_id}' if hermes_session_id else None
+        return item
+
+    def list_conversations(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                self._conversation_select() + """
                 ORDER BY last_activity_at DESC, c.created_at DESC
                 """
             ).fetchall()
-            return [dict(r) for r in rows]
+            return [self._conversation_payload(r) for r in rows]
 
     def create_conversation(self, title: str | None = None) -> dict[str, Any]:
         cid = uuid.uuid4().hex
         title = title or 'New chat'
         with self._connect() as conn:
-            conn.execute('INSERT INTO conversations (id, title) VALUES (?, ?)', (cid, title))
-            row = conn.execute('SELECT id, title, created_at FROM conversations WHERE id = ?', (cid,)).fetchone()
-            return dict(row)
+            conn.execute(
+                'INSERT INTO conversations (id, title, hermes_session_id, sync_state, link_mode) VALUES (?, ?, ?, ?, ?)',
+                (cid, title, cid, 'linked', 'owned'),
+            )
+            row = conn.execute(
+                self._conversation_select() + " HAVING c.id = ?",
+                (cid,),
+            ).fetchone()
+            return self._conversation_payload(row)
 
     def conversation_exists(self, conversation_id: str) -> bool:
         with self._connect() as conn:
