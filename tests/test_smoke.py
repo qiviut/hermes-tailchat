@@ -16,6 +16,7 @@ class DummyHermesProviderError(RuntimeError):
 
 class DummyLocalHermesProvider:
     titles: dict[str, str] = {}
+    session_messages: dict[str, list[dict]] = {}
 
     async def run_turn(self, session_id, conversation_history, user_message, on_event):
         await on_event({"event": "run.completed", "output": f"dummy response for: {user_message}"})
@@ -60,12 +61,27 @@ class DummyLocalHermesProvider:
                 base.append({'id': session_id, 'title': title, 'source': 'api_server', 'started_at': 120.0, 'ended_at': None, 'message_count': 1, 'preview': '', 'last_active': 224.0})
         return base[:limit]
 
+    async def get_session_messages(self, session_id):
+        return list(self.session_messages.get(session_id, []))
+
 
 def load_app(tmp_path: Path):
     db_path = tmp_path / "tailchat-test.db"
     os.environ["TAILCHAT_DB_PATH"] = str(db_path)
     os.environ.setdefault("HERMES_API_KEY", "test-key")
     DummyLocalHermesProvider.titles = {}
+    DummyLocalHermesProvider.session_messages = {
+        'existing-alpha': [
+            {'id': 1, 'role': 'user', 'content': 'hello from cli', 'timestamp': 10.0},
+            {'id': 2, 'role': 'assistant', 'content': '', 'timestamp': 11.0, 'finish_reason': 'tool_calls'},
+            {'id': 3, 'role': 'tool', 'content': '{\"ok\":true}', 'timestamp': 12.0},
+            {'id': 4, 'role': 'assistant', 'content': 'hello from hermes cli', 'timestamp': 13.0},
+        ],
+        'existing-beta': [
+            {'id': 10, 'role': 'user', 'content': 'beta question', 'timestamp': 20.0},
+            {'id': 11, 'role': 'assistant', 'content': 'beta answer', 'timestamp': 21.0},
+        ],
+    }
 
     stub = types.ModuleType("app.hermes_provider")
     stub.HermesProviderError = DummyHermesProviderError
@@ -271,3 +287,51 @@ def test_post_message_uses_attached_hermes_session_id(tmp_path: Path):
                 break
             time.sleep(0.01)
         assert calls == ['existing-alpha']
+
+
+def test_attached_conversation_imports_curated_hermes_transcript(tmp_path: Path):
+    app, _db_path = load_app(tmp_path)
+
+    with TestClient(app) as client:
+        attached = client.post('/api/conversations/attach', json={'hermes_session_id': 'existing-alpha'})
+        convo = attached.json()
+
+        messages = client.get(f"/api/conversations/{convo['id']}/messages")
+        assert messages.status_code == 200
+        body = messages.json()
+        assert [item['role'] for item in body] == ['user', 'assistant']
+        assert [item['content'] for item in body] == ['hello from cli', 'hello from hermes cli']
+        assert all(item['origin'] == 'hermes_import' for item in body)
+
+
+def test_attached_conversation_import_is_idempotent(tmp_path: Path):
+    app, _db_path = load_app(tmp_path)
+
+    with TestClient(app) as client:
+        attached = client.post('/api/conversations/attach', json={'hermes_session_id': 'existing-alpha'})
+        convo = attached.json()
+
+        first = client.get(f"/api/conversations/{convo['id']}/messages")
+        second = client.get(f"/api/conversations/{convo['id']}/messages")
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert len(first.json()) == 2
+        assert len(second.json()) == 2
+
+
+def test_attached_import_cursor_allows_new_external_turns(tmp_path: Path):
+    app, _db_path = load_app(tmp_path)
+
+    with TestClient(app) as client:
+        attached = client.post('/api/conversations/attach', json={'hermes_session_id': 'existing-beta'})
+        convo = attached.json()
+
+        first = client.get(f"/api/conversations/{convo['id']}/messages")
+        assert len(first.json()) == 2
+
+        DummyLocalHermesProvider.session_messages['existing-beta'].append(
+            {'id': 12, 'role': 'assistant', 'content': 'later external note', 'timestamp': 25.0}
+        )
+        second = client.get(f"/api/conversations/{convo['id']}/messages")
+        contents = [item['content'] for item in second.json()]
+        assert contents == ['beta question', 'beta answer', 'later external note']
