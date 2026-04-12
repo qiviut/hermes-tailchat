@@ -5,29 +5,198 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Hermes Tailchat</title>
   <style>
-    body { font-family: system-ui, sans-serif; margin: 0; background: #111827; color: #e5e7eb; }
-    .wrap { display: grid; grid-template-columns: 300px 1fr; height: 100vh; }
-    .sidebar { border-right: 1px solid #374151; padding: 16px; overflow: auto; }
-    .main { display: grid; grid-template-rows: auto 1fr auto; }
-    .topbar { display:flex; justify-content: space-between; gap:12px; padding: 12px 16px; border-bottom: 1px solid #374151; }
-    .messages { padding: 16px; overflow: auto; display: flex; flex-direction: column; gap: 12px; }
-    .composer { border-top: 1px solid #374151; padding: 16px; display: grid; grid-template-columns: 1fr auto auto; gap: 8px; }
-    .msg { padding: 10px 12px; border-radius: 12px; max-width: 900px; white-space: pre-wrap; }
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body { font-family: system-ui, sans-serif; margin: 0; background: #111827; color: #e5e7eb; overflow-x: hidden; }
+    .wrap {
+      display: grid;
+      grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
+      min-height: 100vh;
+      min-height: 100dvh;
+    }
+    .sidebar {
+      border-right: 1px solid #374151;
+      padding: 16px;
+      overflow: auto;
+      min-width: 0;
+    }
+    .main {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      min-width: 0;
+      min-height: 100vh;
+      min-height: 100dvh;
+    }
+    .topbar {
+      display:flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap:12px;
+      padding: 12px 16px;
+      border-bottom: 1px solid #374151;
+    }
+    .messages {
+      padding: 16px;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      min-width: 0;
+    }
+    .composer {
+      border-top: 1px solid #374151;
+      padding: 16px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 8px;
+      align-items: end;
+    }
+    .msg {
+      padding: 10px 12px;
+      border-radius: 12px;
+      max-width: min(900px, 100%);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
     .user { background: #1d4ed8; align-self: flex-end; }
     .assistant { background: #1f2937; align-self: flex-start; }
-    .system { background: #3f3f46; align-self: center; color: #d1d5db; }
+    .system {
+      background: #3f3f46;
+      align-self: center;
+      color: #d1d5db;
+      max-width: min(760px, 100%);
+    }
     button, input, textarea { font: inherit; }
-    input, textarea { background: #0f172a; color: #e5e7eb; border: 1px solid #374151; border-radius: 8px; padding: 10px; }
-    textarea { min-height: 52px; }
-    button { background: #2563eb; color: white; border: 0; border-radius: 8px; padding: 10px 14px; cursor: pointer; }
+    input, textarea {
+      background: #0f172a;
+      color: #e5e7eb;
+      border: 1px solid #374151;
+      border-radius: 8px;
+      padding: 10px;
+      width: 100%;
+      min-width: 0;
+    }
+    textarea {
+      min-height: 52px;
+      resize: vertical;
+    }
+    button {
+      background: #2563eb;
+      color: white;
+      border: 0;
+      border-radius: 8px;
+      padding: 10px 14px;
+      cursor: pointer;
+      min-height: 44px;
+    }
     button.secondary { background: #334155; }
-    .chat-item { padding: 10px; border-radius: 8px; cursor: pointer; margin-bottom: 8px; background: #0f172a; }
+    .chat-item {
+      padding: 10px;
+      border-radius: 8px;
+      cursor: pointer;
+      margin-bottom: 8px;
+      background: #0f172a;
+      overflow: hidden;
+    }
     .chat-item.active { outline: 2px solid #60a5fa; }
+    .chat-item > div:first-child {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .meta { font-size: 12px; color: #93c5fd; }
     .section { margin-top: 18px; }
-    .job, .approval { padding: 8px; border: 1px solid #374151; border-radius: 8px; margin-bottom: 8px; background: #0b1220; }
+    .job, .approval {
+      padding: 8px;
+      border: 1px solid #374151;
+      border-radius: 8px;
+      margin-bottom: 8px;
+      background: #0b1220;
+      overflow-wrap: anywhere;
+    }
     .approval button { margin-right: 6px; margin-top: 8px; }
-    .tool-event { color: #93c5fd; font-size: 12px; }
+    .tool-event {
+      color: #93c5fd;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+
+    @media (max-width: 900px) {
+      .wrap {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto minmax(0, 1fr);
+      }
+      .sidebar {
+        border-right: 0;
+        border-bottom: 1px solid #374151;
+        max-height: 38vh;
+      }
+      .main {
+        min-height: 0;
+      }
+      .topbar {
+        flex-direction: column;
+        align-items: stretch;
+      }
+      .messages {
+        padding: 12px;
+      }
+      .composer {
+        grid-template-columns: 1fr 1fr;
+      }
+      .composer textarea {
+        grid-column: 1 / -1;
+      }
+      .msg,
+      .system {
+        max-width: 100%;
+      }
+    }
+
+    @media (max-width: 640px) {
+      body {
+        font-size: 15px;
+      }
+      .sidebar,
+      .topbar,
+      .composer {
+        padding: 12px;
+      }
+      .sidebar {
+        max-height: none;
+      }
+      .composer {
+        grid-template-columns: 1fr;
+      }
+      .composer textarea {
+        min-height: 96px;
+      }
+      button {
+        width: 100%;
+      }
+      .messages {
+        gap: 10px;
+      }
+    }
+
+    @media (orientation: landscape) and (max-width: 900px) {
+      .wrap {
+        grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+        grid-template-rows: none;
+      }
+      .sidebar {
+        border-right: 1px solid #374151;
+        border-bottom: 0;
+        max-height: none;
+      }
+      .composer {
+        grid-template-columns: minmax(0, 1fr) auto auto;
+      }
+      .composer textarea {
+        grid-column: auto;
+      }
+    }
   </style>
 </head>
 <body>
@@ -69,6 +238,11 @@ const chatListEl = document.getElementById('chatList');
 const jobsEl = document.getElementById('jobs');
 const approvalsEl = document.getElementById('approvals');
 const statusEl = document.getElementById('status');
+const basePath = (() => {
+  const path = window.location.pathname;
+  return path.startsWith('/hermes') ? '/hermes' : '';
+})();
+const apiUrl = (path) => `${basePath}${path}`;
 
 function setStatus(text) { statusEl.textContent = text; }
 
@@ -99,7 +273,7 @@ function appendToolEvent(text) {
 }
 
 async function loadChats() {
-  const res = await fetch('/api/conversations');
+  const res = await fetch(apiUrl('/api/conversations'));
   const chats = await res.json();
   chatListEl.innerHTML = '';
   for (const chat of chats) {
@@ -114,14 +288,14 @@ async function loadChats() {
 
 async function loadJobs() {
   if (!currentChat) return;
-  const res = await fetch(`/api/conversations/${currentChat}/jobs`);
+  const res = await fetch(apiUrl(`/api/conversations/${currentChat}/jobs`));
   const jobs = await res.json();
   jobsEl.innerHTML = jobs.map(job => `<div class="job"><div>${job.prompt}</div><div class="meta">${job.status} · run_after ${job.run_after}</div></div>`).join('') || '<div class="meta">No jobs yet</div>';
 }
 
 async function loadApprovals() {
   if (!currentChat) return;
-  const res = await fetch(`/api/conversations/${currentChat}/approvals`);
+  const res = await fetch(apiUrl(`/api/conversations/${currentChat}/approvals`));
   const approvals = await res.json();
   approvalsEl.innerHTML = '';
   if (!approvals.length) {
@@ -148,20 +322,20 @@ async function loadApprovals() {
 }
 
 async function resolveApproval(id, resolution) {
-  await fetch(`/api/approvals/${id}/resolve`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({resolution})});
+  await fetch(apiUrl(`/api/approvals/${id}/resolve`), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({resolution})});
   await loadApprovals();
 }
 
 async function openChat(id) {
   currentChat = id;
   await loadChats();
-  const res = await fetch(`/api/conversations/${id}/messages`);
+  const res = await fetch(apiUrl(`/api/conversations/${id}/messages`));
   const messages = await res.json();
   renderMessages(messages);
   await loadJobs();
   await loadApprovals();
   if (eventSource) eventSource.close();
-  eventSource = new EventSource(`/api/conversations/${id}/events`);
+  eventSource = new EventSource(apiUrl(`/api/conversations/${id}/events`));
   eventSource.onmessage = async (ev) => {
     const event = JSON.parse(ev.data);
     if (event.event === 'message.created') upsertMessage(event.message);
@@ -197,7 +371,7 @@ async function openChat(id) {
 }
 
 async function newChat() {
-  const res = await fetch('/api/conversations', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({title:'Chat ' + new Date().toLocaleTimeString()})});
+  const res = await fetch(apiUrl('/api/conversations'), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({title:'Chat ' + new Date().toLocaleTimeString()})});
   const chat = await res.json();
   await loadChats();
   await openChat(chat.id);
@@ -211,11 +385,11 @@ async function sendMessage(background = false) {
   input.value = '';
   setStatus(background ? 'job queued' : 'running');
   if (background) {
-    await fetch(`/api/conversations/${currentChat}/jobs`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({prompt: content, delay_seconds: 0})});
+    await fetch(apiUrl(`/api/conversations/${currentChat}/jobs`), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({prompt: content, delay_seconds: 0})});
     await loadJobs();
     return;
   }
-  await fetch(`/api/conversations/${currentChat}/messages`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({content})});
+  await fetch(apiUrl(`/api/conversations/${currentChat}/messages`), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({content})});
 }
 
 document.getElementById('newChat').onclick = newChat;
@@ -228,7 +402,7 @@ document.getElementById('input').addEventListener('keydown', (e) => {
   }
 });
 loadChats().then(async () => {
-  const res = await fetch('/api/conversations');
+  const res = await fetch(apiUrl('/api/conversations'));
   const chats = await res.json();
   if (!chats.length) await newChat();
 });
