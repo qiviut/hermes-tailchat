@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(os.environ.get("HERMES_TAILCHAT_REPO", Path(__file__).resolve().parents[1]))
 BEAD_RE = re.compile(r"\bhermes-tailchat-[a-z0-9]+\b")
 
 

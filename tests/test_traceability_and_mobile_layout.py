@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import re
 import subprocess
 import sys
@@ -25,18 +27,68 @@ def css_block(css: str, condition: str) -> str:
     return match.group(1)
 
 
-def test_traceability_report_reads_requested_range_head() -> None:
+def git(repo: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def write_issues(repo: Path, *issues: dict[str, str]) -> None:
+    beads_dir = repo / ".beads"
+    beads_dir.mkdir(exist_ok=True)
+    lines = [json.dumps(issue) for issue in issues]
+    (beads_dir / "issues.jsonl").write_text("\n".join(lines) + "\n")
+
+
+def commit(repo: Path, message: str) -> None:
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", message)
+
+
+def test_traceability_report_reads_requested_range_head(tmp_path: Path) -> None:
+    repo = tmp_path / "traceability-fixture"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.name", "Hermes Agent")
+    git(repo, "config", "user.email", "hermes@local")
+
+    write_issues(repo, {"id": "hermes-tailchat-a1", "title": "Base bead", "status": "open"})
+    commit(repo, "chore: seed issues")
+
+    write_issues(
+        repo,
+        {"id": "hermes-tailchat-a1", "title": "Base bead", "status": "open"},
+        {"id": "hermes-tailchat-b2", "title": "Range head bead", "status": "open"},
+    )
+    commit(repo, "feat: add range head bead\n\nRefs: hermes-tailchat-b2")
+
+    write_issues(
+        repo,
+        {"id": "hermes-tailchat-a1", "title": "Base bead", "status": "open"},
+        {"id": "hermes-tailchat-b2", "title": "Range head bead", "status": "open"},
+        {"id": "hermes-tailchat-c3", "title": "Later head bead", "status": "open"},
+    )
+    commit(repo, "feat: add later bead\n\nRefs: hermes-tailchat-c3")
+
+    env = os.environ | {"HERMES_TAILCHAT_REPO": str(repo)}
     completed = subprocess.run(
         [sys.executable, str(TRACEABILITY_SCRIPT), "HEAD~2..HEAD~1"],
         cwd=REPO,
         check=True,
         capture_output=True,
         text=True,
+        env=env,
     )
 
-    assert "Created beads:\n  - hermes-tailchat-cvu:" in completed.stdout
-    assert "docs(traceability): add PR template and report tooling" in completed.stdout
-    assert "docs(repo): refresh guidance and merge strategy" not in completed.stdout
+    assert "Created beads:\n  - hermes-tailchat-b2: Range head bead" in completed.stdout
+    assert "feat: add range head bead" in completed.stdout
+    assert "hermes-tailchat-c3" not in completed.stdout
+    assert "feat: add later bead" not in completed.stdout
 
 
 def test_ship_pr_template_leaves_tests_unchecked_by_default() -> None:
