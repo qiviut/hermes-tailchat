@@ -194,6 +194,7 @@ scripts/ship-pr.sh
 
 Policy reference:
 - `docs/policies/branch-protection-and-pr-flow.md`
+- `docs/policies/traceability.md`
 
 That script:
 - refuses to run from `main`
