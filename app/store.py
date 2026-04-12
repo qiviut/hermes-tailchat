@@ -28,7 +28,9 @@ class Store:
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
                 hermes_session_id TEXT,
+                hermes_title TEXT,
                 sync_state TEXT NOT NULL DEFAULT 'linked',
+                sync_error TEXT,
                 link_mode TEXT NOT NULL DEFAULT 'owned',
                 last_hermes_import_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -90,7 +92,9 @@ class Store:
             """)
 
             self._ensure_column(conn, 'conversations', 'hermes_session_id', 'TEXT')
+            self._ensure_column(conn, 'conversations', 'hermes_title', 'TEXT')
             self._ensure_column(conn, 'conversations', 'sync_state', "TEXT NOT NULL DEFAULT 'linked'")
+            self._ensure_column(conn, 'conversations', 'sync_error', 'TEXT')
             self._ensure_column(conn, 'conversations', 'link_mode', "TEXT NOT NULL DEFAULT 'owned'")
             self._ensure_column(conn, 'conversations', 'last_hermes_import_at', 'TEXT')
             conn.execute("UPDATE conversations SET hermes_session_id = COALESCE(hermes_session_id, id)")
@@ -111,11 +115,11 @@ class Store:
 
     def _conversation_select(self) -> str:
         return """
-                SELECT c.id, c.title, c.hermes_session_id, c.sync_state, c.link_mode, c.last_hermes_import_at, c.created_at,
+                SELECT c.id, c.title, c.hermes_session_id, c.hermes_title, c.sync_state, c.sync_error, c.link_mode, c.last_hermes_import_at, c.created_at,
                        COALESCE(MAX(m.created_at), c.created_at) AS last_activity_at
                 FROM conversations c
                 LEFT JOIN messages m ON m.conversation_id = c.id
-                GROUP BY c.id, c.title, c.hermes_session_id, c.sync_state, c.link_mode, c.last_hermes_import_at, c.created_at
+                GROUP BY c.id, c.title, c.hermes_session_id, c.hermes_title, c.sync_state, c.sync_error, c.link_mode, c.last_hermes_import_at, c.created_at
                 """
 
     def _conversation_payload(self, row: sqlite3.Row | None) -> dict[str, Any]:
@@ -140,12 +144,52 @@ class Store:
         title = title or 'New chat'
         with self._connect() as conn:
             conn.execute(
-                'INSERT INTO conversations (id, title, hermes_session_id, sync_state, link_mode) VALUES (?, ?, ?, ?, ?)',
-                (cid, title, cid, 'linked', 'owned'),
+                'INSERT INTO conversations (id, title, hermes_session_id, hermes_title, sync_state, sync_error, link_mode) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                (cid, title, cid, None, 'linked', None, 'owned'),
             )
             row = conn.execute(
                 self._conversation_select() + " HAVING c.id = ?",
                 (cid,),
+            ).fetchone()
+            return self._conversation_payload(row)
+
+    def get_conversation(self, conversation_id: str) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute(
+                self._conversation_select() + " HAVING c.id = ?",
+                (conversation_id,),
+            ).fetchone()
+            return self._conversation_payload(row)
+
+    def update_conversation_title(self, conversation_id: str, title: str) -> dict[str, Any]:
+        with self._connect() as conn:
+            conn.execute('UPDATE conversations SET title = ? WHERE id = ?', (title, conversation_id))
+            row = conn.execute(
+                self._conversation_select() + " HAVING c.id = ?",
+                (conversation_id,),
+            ).fetchone()
+            return self._conversation_payload(row)
+
+    def update_conversation_sync(self, conversation_id: str, *, hermes_title: str | None = None, sync_state: str | None = None, sync_error: str | None = None) -> dict[str, Any]:
+        parts = []
+        args: list[Any] = []
+        if hermes_title is not None or hermes_title is None:
+            parts.append('hermes_title = ?')
+            args.append(hermes_title)
+        if sync_state is not None:
+            parts.append('sync_state = ?')
+            args.append(sync_state)
+        if sync_error is not None or sync_error is None:
+            parts.append('sync_error = ?')
+            args.append(sync_error)
+        if not parts:
+            return self.get_conversation(conversation_id)
+        args.append(conversation_id)
+        with self._connect() as conn:
+            conn.execute(f"UPDATE conversations SET {', '.join(parts)} WHERE id = ?", args)
+            row = conn.execute(
+                self._conversation_select() + " HAVING c.id = ?",
+                (conversation_id,),
             ).fetchone()
             return self._conversation_payload(row)
 

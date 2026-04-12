@@ -14,6 +14,8 @@ class DummyHermesProviderError(RuntimeError):
 
 
 class DummyLocalHermesProvider:
+    titles: dict[str, str] = {}
+
     async def run_turn(self, session_id, conversation_history, user_message, on_event):
         await on_event({"event": "run.completed", "output": f"dummy response for: {user_message}"})
 
@@ -24,11 +26,22 @@ class DummyLocalHermesProvider:
             "resolved_count": 1,
         }
 
+    async def set_session_title(self, session_id, title):
+        for existing_session_id, existing_title in self.titles.items():
+            if existing_session_id != session_id and existing_title == title:
+                raise DummyHermesProviderError(f"Title '{title}' is already in use by session {existing_session_id}")
+        self.titles[session_id] = title
+        return title
+
+    async def get_session_title(self, session_id):
+        return self.titles.get(session_id)
+
 
 def load_app(tmp_path: Path):
     db_path = tmp_path / "tailchat-test.db"
     os.environ["TAILCHAT_DB_PATH"] = str(db_path)
     os.environ.setdefault("HERMES_API_KEY", "test-key")
+    DummyLocalHermesProvider.titles = {}
 
     stub = types.ModuleType("app.hermes_provider")
     stub.HermesProviderError = DummyHermesProviderError
@@ -129,3 +142,45 @@ def test_conversation_linkage_metadata_is_backfilled_and_serialized(tmp_path: Pa
         assert convo["sync_state"] == "linked"
         assert convo["link_mode"] == "owned"
         assert convo["cli_resume_command"] == f"hermes --resume {convo['id']}"
+
+
+def test_new_conversation_syncs_title_to_hermes(tmp_path: Path):
+    app, _db_path = load_app(tmp_path)
+
+    with TestClient(app) as client:
+        created = client.post("/api/conversations", json={"title": "Project Atlas"})
+        assert created.status_code == 200
+        convo = created.json()
+        assert convo["hermes_title"] == "Project Atlas"
+        assert convo["sync_state"] == "linked"
+        assert convo["sync_error"] is None
+
+
+def test_title_collision_keeps_tailchat_conversation_but_marks_sync_error(tmp_path: Path):
+    app, _db_path = load_app(tmp_path)
+
+    with TestClient(app) as client:
+        first = client.post("/api/conversations", json={"title": "Shared Name"})
+        assert first.status_code == 200
+        second = client.post("/api/conversations", json={"title": "Shared Name"})
+        assert second.status_code == 200
+        convo = second.json()
+        assert convo["title"] == "Shared Name"
+        assert convo["sync_state"] == "sync_error"
+        assert "already in use" in convo["sync_error"]
+        assert convo["hermes_title"] is None
+
+
+def test_patch_conversation_title_updates_hermes_title(tmp_path: Path):
+    app, _db_path = load_app(tmp_path)
+
+    with TestClient(app) as client:
+        created = client.post("/api/conversations", json={"title": "Old Title"})
+        convo = created.json()
+        updated = client.patch(f"/api/conversations/{convo['id']}", json={"title": "New Title"})
+        assert updated.status_code == 200
+        body = updated.json()
+        assert body["title"] == "New Title"
+        assert body["hermes_title"] == "New Title"
+        assert body["sync_state"] == "linked"
+        assert body["sync_error"] is None

@@ -272,6 +272,8 @@ function renderSessionMeta(chat) {
     `Hermes session: ${chat.hermes_session_id}`,
     `link ${chat.link_mode || 'unknown'} · sync ${chat.sync_state || 'unknown'}`
   ];
+  if (chat.hermes_title) parts.push(`Hermes title: ${chat.hermes_title}`);
+  if (chat.sync_error) parts.push(`sync warning: ${chat.sync_error}`);
   if (chat.cli_resume_command) parts.push(chat.cli_resume_command);
   sessionMetaEl.textContent = parts.join(' · ');
 }
@@ -311,7 +313,7 @@ async function loadChats() {
   for (const chat of chats) {
     const div = document.createElement('div');
     div.className = 'chat-item' + (chat.id === currentChat ? ' active' : '');
-    div.innerHTML = `<div>${chat.title}</div><div class="meta">${chat.last_activity_at || chat.created_at}</div><div class="meta">Hermes ${chat.hermes_session_id || 'unlinked'}</div>`;
+    div.innerHTML = `<div>${chat.title}</div><div class="meta">${chat.last_activity_at || chat.created_at}</div><div class="meta">Hermes ${chat.hermes_title || chat.hermes_session_id || 'unlinked'}</div>${chat.sync_error ? `<div class="meta">sync warning: ${chat.sync_error}</div>` : ''}`;
     div.onclick = () => openChat(chat.id);
     chatListEl.appendChild(div);
   }
