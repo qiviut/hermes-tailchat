@@ -95,7 +95,7 @@ pip install -e .
 Run Tailchat directly:
 
 ```bash
-export HERMES_API_KEY=replace-me
+export HERMES_API_KEY=***
 uvicorn app.main:app --host 127.0.0.1 --port 8766 --reload
 ```
 
@@ -134,7 +134,7 @@ WantedBy=default.target
 Example env file referenced by `EnvironmentFile=`:
 
 ```bash
-HERMES_API_KEY=replace-me
+HERMES_API_KEY=***
 # optional overrides
 # HERMES_API_BASE_URL=http://127.0.0.1:8642
 # TAILCHAT_DB_PATH=/path/to/tailchat.db
@@ -146,6 +146,56 @@ Then:
 systemctl --user daemon-reload
 systemctl --user enable --now hermes-tailchat.service
 systemctl --user status hermes-tailchat.service
+```
+
+### Local-first auto-redeploy on `main`
+
+If this host is the place where changes are made first, the main failure mode is usually:
+- local `main` changes
+- the running systemd service keeps serving the old loaded code
+- nobody restarts it
+
+This repo now includes a local-first deploy path:
+- `scripts/deploy-local.sh`
+- `scripts/install-local-autodeploy.sh`
+- `systemd/hermes-tailchat-deploy.service`
+- `systemd/hermes-tailchat-deploy.path`
+
+Manual deploy from local `main`:
+
+```bash
+scripts/deploy-local.sh
+```
+
+That script:
+- refuses to deploy from non-`main`
+- restarts `hermes-tailchat.service`
+- waits for `/health`
+- records the deployed git revision in `~/.local/state/hermes-tailchat/deployed-rev`
+
+Install automatic local redeploy when `.git/refs/heads/main` changes:
+
+```bash
+scripts/install-local-autodeploy.sh
+```
+
+That installs a user-level path unit which watches:
+- `%h/.openclaw/workspace/hermes-tailchat/.git/refs/heads/main`
+
+When local `main` advances, systemd runs `scripts/deploy-local.sh` automatically.
+
+Useful commands:
+
+```bash
+systemctl --user status hermes-tailchat-deploy.path
+systemctl --user status hermes-tailchat-deploy.service
+journalctl --user -u hermes-tailchat-deploy.service -n 50 --no-pager
+```
+
+If you need to force a restart even when the deployed revision file already matches:
+
+```bash
+FORCE_DEPLOY=1 scripts/deploy-local.sh
 ```
 
 ## Tailscale Serve
@@ -218,30 +268,3 @@ Optional modes:
 scripts/ship-pr.sh --arm-auto
 scripts/ship-pr.sh --merge-now
 ```
-
-Notes:
-- `--arm-auto` enables GitHub auto-merge using squash merge.
-- `--merge-now` merges immediately using squash merge.
-- if the repository lacks required review/check protections, these modes may merge immediately, so add GitHub protections before relying on them as policy.
-
-## Product backlog focus
-
-The backlog is not only about repo/process hardening. It also includes chat-app improvements, especially:
-- mobile-friendly layout and orientation support
-- reconnect/resume behavior for intermittent mobile sessions
-- background-job visibility and resumability
-- real Hermes-backed end-to-end smoke coverage
-
-Current core product epics in beads:
-- `hermes-tailchat-oxf` Improve single-user usability and session resilience
-- `hermes-tailchat-ppb` Strengthen background job visibility and resumability
-- `hermes-tailchat-ipx` Make reconnect and intermittent mobile access resilient
-- `hermes-tailchat-k6t` Add automated smoke coverage for core chat and `/hermes` subpath hosting
-
-## Suggested next steps
-
-Near-term roadmap themes:
-- mobile-friendly UX and reconnect behavior
-- better background-job visibility and resumability
-- project hygiene: tests, CI, Dependabot, SAST
-- lightweight hardening without slowing down iteration

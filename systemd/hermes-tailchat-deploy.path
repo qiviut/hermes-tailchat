@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch local main-branch ref changes and redeploy Hermes Tailchat
+
+[Path]
+PathChanged=%h/.openclaw/workspace/hermes-tailchat/.git/refs/heads/main
+Unit=hermes-tailchat-deploy.service
+
+[Install]
+WantedBy=default.target
