@@ -41,6 +41,8 @@ class Store:
                 role TEXT NOT NULL,
                 content TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'complete',
+                origin TEXT NOT NULL DEFAULT 'tailchat',
+                external_message_ref TEXT,
                 metadata_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
@@ -101,7 +103,10 @@ class Store:
             conn.execute("UPDATE conversations SET sync_state = COALESCE(NULLIF(sync_state, ''), 'linked')")
             conn.execute("UPDATE conversations SET link_mode = COALESCE(NULLIF(link_mode, ''), 'owned')")
 
+            self._ensure_column(conn, 'messages', 'origin', "TEXT NOT NULL DEFAULT 'tailchat'")
+            self._ensure_column(conn, 'messages', 'external_message_ref', 'TEXT')
             self._ensure_column(conn, 'messages', 'metadata_json', "TEXT NOT NULL DEFAULT '{}'" )
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_external_ref ON messages(conversation_id, external_message_ref) WHERE external_message_ref IS NOT NULL")
             self._ensure_column(conn, 'runs', 'job_id', 'TEXT')
             self._ensure_column(conn, 'runs', 'error_text', "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, 'jobs', 'result_message_id', 'TEXT')
@@ -214,6 +219,38 @@ class Store:
             ).fetchone()
             return self._conversation_payload(row)
 
+    def import_hermes_messages(self, conversation_id: str, messages: list[dict[str, Any]]) -> int:
+        imported = 0
+        with self._connect() as conn:
+            for message in messages:
+                payload = json.dumps(message.get('metadata', {}))
+                cursor = conn.execute(
+                    'INSERT OR IGNORE INTO messages (id, conversation_id, role, content, status, origin, external_message_ref, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                    (
+                        uuid.uuid4().hex,
+                        conversation_id,
+                        message['role'],
+                        message['content'],
+                        message.get('status', 'complete'),
+                        'hermes_import',
+                        message['external_message_ref'],
+                        payload,
+                    ),
+                )
+                if cursor.rowcount:
+                    imported += 1
+        return imported
+
+    def update_last_hermes_import_at(self, conversation_id: str, timestamp: float | str | None) -> dict[str, Any]:
+        value = None if timestamp is None else str(timestamp)
+        with self._connect() as conn:
+            conn.execute('UPDATE conversations SET last_hermes_import_at = ? WHERE id = ?', (value, conversation_id))
+            row = conn.execute(
+                self._conversation_select() + " HAVING c.id = ?",
+                (conversation_id,),
+            ).fetchone()
+            return self._conversation_payload(row)
+
     def conversation_exists(self, conversation_id: str) -> bool:
         with self._connect() as conn:
             row = conn.execute('SELECT 1 FROM conversations WHERE id = ?', (conversation_id,)).fetchone()
@@ -222,7 +259,7 @@ class Store:
     def get_messages(self, conversation_id: str) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
-                'SELECT id, conversation_id, role, content, status, metadata_json, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at, rowid',
+                'SELECT id, conversation_id, role, content, status, origin, external_message_ref, metadata_json, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at, rowid',
                 (conversation_id,),
             ).fetchall()
             items = []
@@ -232,13 +269,13 @@ class Store:
                 items.append(item)
             return items
 
-    def add_message(self, conversation_id: str, role: str, content: str, status: str = 'complete', metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    def add_message(self, conversation_id: str, role: str, content: str, status: str = 'complete', metadata: dict[str, Any] | None = None, origin: str = 'tailchat', external_message_ref: str | None = None) -> dict[str, Any]:
         mid = uuid.uuid4().hex
         payload = json.dumps(metadata or {})
         with self._connect() as conn:
             conn.execute(
-                'INSERT INTO messages (id, conversation_id, role, content, status, metadata_json) VALUES (?, ?, ?, ?, ?, ?)',
-                (mid, conversation_id, role, content, status, payload),
+                'INSERT INTO messages (id, conversation_id, role, content, status, origin, external_message_ref, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                (mid, conversation_id, role, content, status, origin, external_message_ref, payload),
             )
             row = conn.execute('SELECT * FROM messages WHERE id = ?', (mid,)).fetchone()
             item = dict(row)

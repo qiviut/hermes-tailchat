@@ -129,6 +129,10 @@ class LocalHermesProvider:
 
         return await loop.run_in_executor(None, run_sync)
 
+    async def get_session_messages(self, session_id: str) -> list[dict[str, Any]]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._session_db.get_messages, session_id)
+
     async def set_session_title(self, session_id: str, title: str) -> str | None:
         loop = asyncio.get_running_loop()
 

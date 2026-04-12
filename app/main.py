@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -95,6 +96,58 @@ async def publish(conversation_id: str, event: dict, run_id: str | None = None):
     await broker.publish(conversation_id, event)
 
 
+
+
+def _parse_import_cursor(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _curated_importable_messages(session_id: str, hermes_messages: list[dict[str, object]], after_timestamp: float | None = None) -> tuple[list[dict[str, object]], float | None]:
+    imported = []
+    max_timestamp = after_timestamp
+    for message in hermes_messages:
+        timestamp = message.get('timestamp')
+        if isinstance(timestamp, (int, float)):
+            max_timestamp = max(timestamp, max_timestamp or timestamp)
+            if after_timestamp is not None and timestamp <= after_timestamp:
+                continue
+        role = message.get('role')
+        content = (message.get('content') or '').strip()
+        if role not in {'user', 'assistant'}:
+            continue
+        if not content:
+            continue
+        external_ref = f"hermes:{session_id}:{message.get('id')}"
+        imported.append({
+            'role': role,
+            'content': content,
+            'status': 'complete',
+            'external_message_ref': external_ref,
+            'metadata': {'origin': 'hermes_import', 'hermes_message_id': message.get('id')},
+        })
+    return imported, max_timestamp
+
+
+async def sync_attached_transcript(conversation_id: str) -> dict:
+    conversation = store.get_conversation(conversation_id)
+    if not conversation or conversation.get('link_mode') != 'attached':
+        return conversation
+    session_id = conversation.get('hermes_session_id')
+    if not session_id:
+        return conversation
+    hermes_messages = await hermes.get_session_messages(session_id)
+    curated, max_timestamp = _curated_importable_messages(session_id, hermes_messages, _parse_import_cursor(conversation.get('last_hermes_import_at')))
+    if curated:
+        store.import_hermes_messages(conversation_id, curated)
+    if max_timestamp is not None:
+        conversation = store.update_last_hermes_import_at(conversation_id, max_timestamp)
+    return conversation
+
 async def run_turn(conversation_id: str, assistant_message_id: str, user_message: str, run_id: str, job_id: str | None = None) -> None:
     conversation = store.get_conversation(conversation_id)
     hermes_session_id = (conversation or {}).get('hermes_session_id') or conversation_id
@@ -139,6 +192,8 @@ async def run_turn(conversation_id: str, assistant_message_id: str, user_message
             store.update_run(run_id, status='complete')
             if job_id:
                 store.update_job(job_id, status='complete', result_message_id=assistant_message_id)
+            if conversation.get('link_mode') == 'attached':
+                store.update_last_hermes_import_at(conversation_id, time.time())
             await publish(conversation_id, {'event': 'message.completed', 'message_id': assistant_message_id, 'content': final, 'run_id': run_id, 'job_id': job_id}, run_id=run_id)
             return
         if kind == 'run.failed':
@@ -147,6 +202,8 @@ async def run_turn(conversation_id: str, assistant_message_id: str, user_message
             store.update_run(run_id, status='error', error_text=err)
             if job_id:
                 store.update_job(job_id, status='error', error_text=err, result_message_id=assistant_message_id)
+            if conversation.get('link_mode') == 'attached':
+                store.update_last_hermes_import_at(conversation_id, time.time())
             await publish(conversation_id, {'event': 'message.error', 'message_id': assistant_message_id, 'error': err, 'run_id': run_id, 'job_id': job_id}, run_id=run_id)
             return
         await publish(conversation_id, dict(event, run_id=run_id, job_id=job_id), run_id=run_id)
@@ -159,6 +216,8 @@ async def run_turn(conversation_id: str, assistant_message_id: str, user_message
         store.update_run(run_id, status='error', error_text=err)
         if job_id:
             store.update_job(job_id, status='error', error_text=err, result_message_id=assistant_message_id)
+        if conversation.get('link_mode') == 'attached':
+            store.update_last_hermes_import_at(conversation_id, time.time())
         await publish(conversation_id, {'event': 'message.error', 'message_id': assistant_message_id, 'error': err, 'run_id': run_id, 'job_id': job_id}, run_id=run_id)
     except Exception as exc:
         err = str(exc)
@@ -166,6 +225,8 @@ async def run_turn(conversation_id: str, assistant_message_id: str, user_message
         store.update_run(run_id, status='error', error_text=err)
         if job_id:
             store.update_job(job_id, status='error', error_text=err, result_message_id=assistant_message_id)
+        if conversation.get('link_mode') == 'attached':
+            store.update_last_hermes_import_at(conversation_id, time.time())
         await publish(conversation_id, {'event': 'message.error', 'message_id': assistant_message_id, 'error': err, 'run_id': run_id, 'job_id': job_id}, run_id=run_id)
 
 
@@ -273,6 +334,9 @@ async def update_conversation(conversation_id: str, body: ConversationUpdate):
 
 @app.get('/api/conversations/{conversation_id}/messages')
 async def get_messages(conversation_id: str):
+    if not store.conversation_exists(conversation_id):
+        raise HTTPException(status_code=404, detail='conversation not found')
+    await sync_attached_transcript(conversation_id)
     return store.get_messages(conversation_id)
 
 
