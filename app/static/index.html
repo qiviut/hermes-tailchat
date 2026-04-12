@@ -385,10 +385,22 @@ async function openAttachPanel() {
   attachStatusEl.textContent = 'Loading Hermes sessions…';
   attachListEl.innerHTML = '';
   selectedAttachSessionId = null;
-  const res = await fetch(apiUrl('/api/hermes/sessions?limit=20'));
-  const sessions = await res.json();
-  attachableSessions = sessions.filter(session => !session.already_attached);
-  renderAttachSessions();
+  try {
+    const res = await fetch(apiUrl('/api/hermes/sessions?limit=20'));
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok || !Array.isArray(payload)) {
+      attachableSessions = [];
+      attachStatusEl.textContent = payload.detail || 'Failed to load Hermes sessions.';
+      renderAttachSessions();
+      return;
+    }
+    attachableSessions = payload.filter(session => !session.already_attached);
+    renderAttachSessions();
+  } catch (error) {
+    attachableSessions = [];
+    attachStatusEl.textContent = `Failed to load Hermes sessions: ${error}`;
+    renderAttachSessions();
+  }
 }
 
 function closeAttachPanel() {
