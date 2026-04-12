@@ -106,6 +106,15 @@
       white-space: nowrap;
     }
     .meta { font-size: 12px; color: #93c5fd; }
+    .session-link {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      align-items: flex-end;
+      text-align: right;
+      max-width: min(100%, 460px);
+      overflow-wrap: anywhere;
+    }
     .section { margin-top: 18px; }
     .job, .approval {
       padding: 8px;
@@ -138,6 +147,10 @@
       .topbar {
         flex-direction: column;
         align-items: stretch;
+      }
+      .session-link {
+        align-items: stretch;
+        text-align: left;
       }
       .messages {
         padding: 12px;
@@ -219,7 +232,10 @@
           <div style="font-weight:600">Hermes Tailchat</div>
           <div class="meta">Tailnet-only MVP. Auth intentionally skipped for now.</div>
         </div>
-        <div id="status" class="meta">idle</div>
+        <div class="session-link">
+          <div id="status" class="meta">idle</div>
+          <div id="sessionMeta" class="meta">No linked Hermes session yet</div>
+        </div>
       </div>
       <div id="messages" class="messages"></div>
       <div class="composer">
@@ -238,6 +254,7 @@ const chatListEl = document.getElementById('chatList');
 const jobsEl = document.getElementById('jobs');
 const approvalsEl = document.getElementById('approvals');
 const statusEl = document.getElementById('status');
+const sessionMetaEl = document.getElementById('sessionMeta');
 const basePath = (() => {
   const path = window.location.pathname;
   return path.startsWith('/hermes') ? '/hermes' : '';
@@ -245,6 +262,19 @@ const basePath = (() => {
 const apiUrl = (path) => `${basePath}${path}`;
 
 function setStatus(text) { statusEl.textContent = text; }
+
+function renderSessionMeta(chat) {
+  if (!chat || !chat.hermes_session_id) {
+    sessionMetaEl.textContent = 'No linked Hermes session yet';
+    return;
+  }
+  const parts = [
+    `Hermes session: ${chat.hermes_session_id}`,
+    `link ${chat.link_mode || 'unknown'} · sync ${chat.sync_state || 'unknown'}`
+  ];
+  if (chat.cli_resume_command) parts.push(chat.cli_resume_command);
+  sessionMetaEl.textContent = parts.join(' · ');
+}
 
 function renderMessages(messages) {
   messagesEl.innerHTML = '';
@@ -276,10 +306,12 @@ async function loadChats() {
   const res = await fetch(apiUrl('/api/conversations'));
   const chats = await res.json();
   chatListEl.innerHTML = '';
+  const currentChatData = chats.find(chat => chat.id === currentChat);
+  renderSessionMeta(currentChatData || chats[0] || null);
   for (const chat of chats) {
     const div = document.createElement('div');
     div.className = 'chat-item' + (chat.id === currentChat ? ' active' : '');
-    div.innerHTML = `<div>${chat.title}</div><div class="meta">${chat.last_activity_at || chat.created_at}</div>`;
+    div.innerHTML = `<div>${chat.title}</div><div class="meta">${chat.last_activity_at || chat.created_at}</div><div class="meta">Hermes ${chat.hermes_session_id || 'unlinked'}</div>`;
     div.onclick = () => openChat(chat.id);
     chatListEl.appendChild(div);
   }

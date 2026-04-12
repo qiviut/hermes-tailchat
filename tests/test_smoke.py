@@ -51,6 +51,7 @@ def test_health_endpoint_works_from_root_and_hermes_prefix(tmp_path: Path):
         assert root.status_code == 200
         assert root.json()["ok"] is True
         assert root.json()["db_path"] == str(db_path)
+        assert root.json()["session_linkage_mode"] == "session-aware-abstraction-layer"
 
         prefixed = client.get("/hermes/health")
         assert prefixed.status_code == 200
@@ -98,3 +99,33 @@ def test_job_creation_works_through_hermes_prefix(tmp_path: Path):
         assert jobs.status_code == 200
         listed_jobs = jobs.json()
         assert any(item["id"] == job["id"] for item in listed_jobs)
+
+
+def test_conversation_linkage_metadata_is_backfilled_and_serialized(tmp_path: Path):
+    import sqlite3
+
+    db_path = tmp_path / "tailchat-test.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+    conn.execute("INSERT INTO conversations (id, title) VALUES (?, ?)", ("legacy-convo", "Legacy chat"))
+    conn.commit()
+    conn.close()
+
+    app, _db_path = load_app(tmp_path)
+
+    with TestClient(app) as client:
+        listed = client.get("/api/conversations")
+        assert listed.status_code == 200
+        legacy = next(item for item in listed.json() if item["id"] == "legacy-convo")
+        assert legacy["hermes_session_id"] == "legacy-convo"
+        assert legacy["sync_state"] == "linked"
+        assert legacy["link_mode"] == "owned"
+        assert legacy["cli_resume_command"] == "hermes --resume legacy-convo"
+
+        created = client.post("/api/conversations", json={"title": "linked convo"})
+        assert created.status_code == 200
+        convo = created.json()
+        assert convo["hermes_session_id"] == convo["id"]
+        assert convo["sync_state"] == "linked"
+        assert convo["link_mode"] == "owned"
+        assert convo["cli_resume_command"] == f"hermes --resume {convo['id']}"

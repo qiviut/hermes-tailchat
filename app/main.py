@@ -195,7 +195,13 @@ async def index():
 
 @app.get('/health')
 async def health():
-    return {'ok': True, 'db_path': str(DB_PATH), 'worker_id': worker_id, 'provider': 'local-hermes'}
+    return {
+        'ok': True,
+        'db_path': str(DB_PATH),
+        'worker_id': worker_id,
+        'provider': 'local-hermes',
+        'session_linkage_mode': 'session-aware-abstraction-layer',
+    }
 
 
 @app.get('/api/conversations')
