@@ -5,6 +5,7 @@ import os
 import sys
 import types
 from pathlib import Path
+import time
 
 from fastapi.testclient import TestClient
 
@@ -34,7 +35,30 @@ class DummyLocalHermesProvider:
         return title
 
     async def get_session_title(self, session_id):
-        return self.titles.get(session_id)
+        preset_titles = {'existing-alpha': 'Existing Alpha', 'existing-beta': 'Existing Beta'}
+        return self.titles.get(session_id, preset_titles.get(session_id))
+
+    async def get_session(self, session_id):
+        preset_titles = {'existing-alpha': 'Existing Alpha', 'existing-beta': 'Existing Beta'}
+        title = self.titles.get(session_id, preset_titles.get(session_id))
+        if title is None and not session_id.startswith('existing-'):
+            return None
+        return {
+            'id': session_id,
+            'source': 'cli',
+            'title': title,
+            'started_at': 123.0,
+        }
+
+    async def list_sessions(self, source=None, limit=20):
+        base = [
+            {'id': 'existing-alpha', 'title': 'Existing Alpha', 'source': 'cli', 'started_at': 111.0, 'ended_at': None, 'message_count': 3, 'preview': 'alpha preview', 'last_active': 222.0},
+            {'id': 'existing-beta', 'title': 'Existing Beta', 'source': 'cli', 'started_at': 112.0, 'ended_at': None, 'message_count': 4, 'preview': 'beta preview', 'last_active': 223.0},
+        ]
+        for session_id, title in self.titles.items():
+            if session_id not in {item['id'] for item in base}:
+                base.append({'id': session_id, 'title': title, 'source': 'api_server', 'started_at': 120.0, 'ended_at': None, 'message_count': 1, 'preview': '', 'last_active': 224.0})
+        return base[:limit]
 
 
 def load_app(tmp_path: Path):
@@ -184,3 +208,66 @@ def test_patch_conversation_title_updates_hermes_title(tmp_path: Path):
         assert body["hermes_title"] == "New Title"
         assert body["sync_state"] == "linked"
         assert body["sync_error"] is None
+
+
+def test_attach_existing_hermes_session_creates_attached_conversation(tmp_path: Path):
+    app, _db_path = load_app(tmp_path)
+
+    with TestClient(app) as client:
+        sessions = client.get('/api/hermes/sessions')
+        assert sessions.status_code == 200
+        listed = sessions.json()
+        assert any(item['id'] == 'existing-alpha' for item in listed)
+
+        attached = client.post('/api/conversations/attach', json={'hermes_session_id': 'existing-alpha'})
+        assert attached.status_code == 200
+        convo = attached.json()
+        assert convo['hermes_session_id'] == 'existing-alpha'
+        assert convo['link_mode'] == 'attached'
+        assert convo['title'] == 'Attached existing-alp' or convo['title'] == 'Existing Alpha'
+
+
+def test_attach_existing_session_prefers_hermes_title(tmp_path: Path):
+    app, _db_path = load_app(tmp_path)
+
+    with TestClient(app) as client:
+        client.post('/api/conversations', json={'title': 'seed title'})
+        attach = client.post('/api/conversations/attach', json={'hermes_session_id': 'existing-beta'})
+        assert attach.status_code == 200
+        convo = attach.json()
+        assert convo['title'] == 'Existing Beta'
+        assert convo['hermes_title'] == 'Existing Beta'
+
+
+def test_attach_rejects_duplicate_hermes_session_links(tmp_path: Path):
+    app, _db_path = load_app(tmp_path)
+
+    with TestClient(app) as client:
+        first = client.post('/api/conversations/attach', json={'hermes_session_id': 'existing-alpha'})
+        assert first.status_code == 200
+        second = client.post('/api/conversations/attach', json={'hermes_session_id': 'existing-alpha'})
+        assert second.status_code == 409
+
+
+def test_post_message_uses_attached_hermes_session_id(tmp_path: Path):
+    app, _db_path = load_app(tmp_path)
+
+    calls = []
+
+    async def recording_run_turn(session_id, conversation_history, user_message, on_event):
+        calls.append(session_id)
+        await on_event({'event': 'run.completed', 'output': f'dummy response for: {user_message}'})
+
+    import app.main as main_module
+    main_module.hermes.run_turn = recording_run_turn
+
+    with TestClient(app) as client:
+        attached = client.post('/api/conversations/attach', json={'hermes_session_id': 'existing-alpha'})
+        convo = attached.json()
+        posted = client.post(f"/api/conversations/{convo['id']}/messages", json={'content': 'hello from tailchat'})
+        assert posted.status_code == 200
+        for _ in range(20):
+            if calls:
+                break
+            time.sleep(0.01)
+        assert calls == ['existing-alpha']

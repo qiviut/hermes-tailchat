@@ -153,6 +153,27 @@ class Store:
             ).fetchone()
             return self._conversation_payload(row)
 
+    def attach_conversation(self, hermes_session_id: str, title: str, hermes_title: str | None = None) -> dict[str, Any]:
+        cid = uuid.uuid4().hex
+        with self._connect() as conn:
+            conn.execute(
+                'INSERT INTO conversations (id, title, hermes_session_id, hermes_title, sync_state, sync_error, link_mode) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                (cid, title, hermes_session_id, hermes_title, 'linked', None, 'attached'),
+            )
+            row = conn.execute(
+                self._conversation_select() + " HAVING c.id = ?",
+                (cid,),
+            ).fetchone()
+            return self._conversation_payload(row)
+
+    def get_conversation_by_hermes_session_id(self, hermes_session_id: str) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute(
+                self._conversation_select() + " HAVING c.hermes_session_id = ?",
+                (hermes_session_id,),
+            ).fetchone()
+            return self._conversation_payload(row)
+
     def get_conversation(self, conversation_id: str) -> dict[str, Any]:
         with self._connect() as conn:
             row = conn.execute(

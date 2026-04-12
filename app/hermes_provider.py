@@ -104,6 +104,31 @@ class LocalHermesProvider:
         else:
             await on_event({'event': 'run.failed', 'error': 'No response generated'})
 
+    async def get_session(self, session_id: str) -> dict[str, Any] | None:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._session_db.get_session, session_id)
+
+    async def list_sessions(self, source: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        loop = asyncio.get_running_loop()
+
+        def run_sync() -> list[dict[str, Any]]:
+            sessions = self._session_db.list_sessions_rich(source=source, limit=limit)
+            return [
+                {
+                    'id': item.get('id'),
+                    'title': item.get('title'),
+                    'source': item.get('source'),
+                    'started_at': item.get('started_at'),
+                    'ended_at': item.get('ended_at'),
+                    'message_count': item.get('message_count'),
+                    'preview': item.get('preview', ''),
+                    'last_active': item.get('last_active'),
+                }
+                for item in sessions
+            ]
+
+        return await loop.run_in_executor(None, run_sync)
+
     async def set_session_title(self, session_id: str, title: str) -> str | None:
         loop = asyncio.get_running_loop()
 
