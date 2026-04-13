@@ -115,6 +115,21 @@ A bead is not functionally done until its required git artifact exists:
 
 ---
 
+## Protocol matrix: who talks to whom, and about what
+
+| Sender | Recipient | Primary purpose | Typical trigger | Required evidence in message |
+| --- | --- | --- | --- | --- |
+| Codex worker | `br` / `bv` | discover and claim ready work | starting or re-entering work | bead ID, current dependency state |
+| Codex worker | Codex worker | handoff / review / blocker coordination | implementation crosses file or review boundary | thread ID, affected files, tests run or needed |
+| Codex worker | Hermes overseer | clarification / policy / memory / human escalation request | ambiguity changes behavior or graph shape | bead ID, options considered, recommended option, impact if unanswered |
+| Hermes overseer | Codex worker | decision / policy answer / re-scope guidance | Hermes can resolve the issue without human input | authoritative doc or policy pointer, explicit next step |
+| Hermes overseer | Human | product-risk or ambiguous business decision | Hermes cannot safely resolve from repo context | concise options, recommendation, impact of each option |
+
+### Design rule
+Hermes should be addressable as a dedicated mailbox, not as a passive subscriber to all worker traffic. Codex workers should know exactly when to send direct mail to Hermes, and otherwise should coordinate directly with each other.
+
+---
+
 ## Mailbox topology
 
 ## Single Agent Mail instance by default
@@ -209,6 +224,16 @@ Use only when Hermes cannot safely resolve the question from:
 ---
 
 ## Work lifecycle
+
+### 0. Select execution context
+Before claiming a bead, the agent decides whether the work can stay in the current checkout or needs stronger isolation.
+
+Choose the lightest safe option:
+- same checkout + file reservations for small non-overlapping changes
+- dedicated git worktree for larger or longer-running implementation slices
+- dedicated review worktree when a reviewer needs clean isolation from the implementation worker
+
+The chosen context should be reflected in the `[start]` mail body and, where practical, in the bead notes or branch name.
 
 ### 1. Pick work
 Agent runs one of:
@@ -329,6 +354,16 @@ Must define:
 - when Hermes answers directly vs escalates to human
 - how Hermes curates lessons into memory/skills/docs
 - how Hermes summarizes multi-agent progress back to the human
+
+### E. Skills and durable-memory layer
+Audience:
+- Hermes primarily, but discoverable by Codex workers through repo guidance
+
+Must define:
+- where reusable procedures become skills
+- how lessons are promoted from ad hoc mail into durable memory or docs
+- how Codex workers discover approved process patterns without depending on chat history
+- how stale guidance gets patched when implementation teaches a better workflow
 
 ---
 
@@ -452,6 +487,22 @@ Examples:
 Examples:
 - pick ready bead → claim → reserve → implement → request review → close beads → sync
 - clarification to Hermes → Hermes decision → worker continues
+
+### 5. Negative-path tests
+Examples:
+- a worker marks a bead done without commit evidence and the policy helper rejects it
+- Hermes receives routine worker chatter without a `[clarify]`, `[escalation]`, or `[lesson]` subject and ignores it
+- a sidecar review bead is missing and a non-trivial implementation slice remains uncloseable
+
+### Recommended initial automated test matrix
+| Slice | Proof artifact |
+| --- | --- |
+| role-specific AGENTS docs exist and contain required headings | `pytest` content assertions over markdown files |
+| message fixtures follow subject/body contract | fixture-schema tests |
+| bead helper emits implementation/test/review relationships | helper unit tests against generated `br` payloads |
+| Hermes escalation intake filters only high-signal mail | intake unit tests with mixed subject samples |
+| traceability helper requires bead refs/tests/review IDs | script/unit tests with valid and invalid commit/PR metadata |
+| coordination loop stays reproducible | integration test with fixture-backed fake mail + fake bead store |
 
 ---
 

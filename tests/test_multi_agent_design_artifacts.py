@@ -17,6 +17,8 @@ def test_design_doc_exists_and_covers_required_topics():
         "sidecar review bead",
         "Testability requirements",
         "Clarification contract: Codex → Hermes",
+        "Protocol matrix: who talks to whom, and about what",
+        "Recommended initial automated test matrix",
     ]
 
     for phrase in required_phrases:
@@ -33,6 +35,16 @@ def test_role_specific_agents_guidance_docs_exist():
         assert path.exists(), f"missing {path}"
         text = path.read_text()
         assert "Mission" in text
+
+
+def test_root_agents_points_to_role_specific_guidance():
+    text = (ROOT / "AGENTS.md").read_text()
+    for relpath in [
+        "docs/agents/codex-worker-AGENTS.md",
+        "docs/agents/codex-reviewer-AGENTS.md",
+        "docs/agents/hermes-overseer-AGENTS.md",
+    ]:
+        assert relpath in text
 
 
 def test_message_fixtures_cover_required_contract_fields():

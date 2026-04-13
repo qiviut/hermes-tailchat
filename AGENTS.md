@@ -23,11 +23,15 @@ Current design center:
 ## Before making changes
 
 1. Read `README.md`.
-2. Read relevant docs under `docs/policies/` and `docs/research/`.
-3. Check the current beads state:
+2. Read relevant docs under `docs/policies/`, `docs/design/`, and `docs/research/`.
+3. If you are acting in a specialized role, also read the matching role guidance under `docs/agents/`:
+   - `docs/agents/codex-worker-AGENTS.md`
+   - `docs/agents/codex-reviewer-AGENTS.md`
+   - `docs/agents/hermes-overseer-AGENTS.md`
+4. Check the current beads state:
    - `br ready --json`
    - `br show BEAD_ID --json`
-4. Claim the bead before substantial work:
+5. Claim the bead before substantial work:
    - `br update BEAD_ID --status in_progress`
 
 ## Planning / execution conventions
