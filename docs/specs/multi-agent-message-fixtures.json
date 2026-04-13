@@ -1,0 +1,54 @@
+{
+  "subjects": [
+    "[start][hermes-tailchat-example] Begin implementation",
+    "[review-request][hermes-tailchat-example] Need reviewer pass",
+    "[clarify][hermes-tailchat-example] Need decision on sidecar review trigger",
+    "[lesson][hermes-tailchat-example] Reusable traceability pitfall"
+  ],
+  "clarify": {
+    "thread_id": "hermes-tailchat-example",
+    "subject": "[clarify][hermes-tailchat-example] Need decision on sidecar review trigger",
+    "body": {
+      "goal": "Implement AGENTS guidance for sidecar review beads",
+      "checked": [
+        "docs/policies/traceability.md",
+        "docs/policies/branch-protection-and-pr-flow.md",
+        "docs/design/2026-04-13-hermes-codex-multi-agent-coordination.md"
+      ],
+      "ambiguity": "Should trivial docs-only bead updates require a sidecar review bead?",
+      "options": [
+        "always require sidecar review beads",
+        "require sidecar review only for non-trivial changes",
+        "skip sidecar review when a change is docs-only and low risk"
+      ],
+      "recommended_option": "require sidecar review only for non-trivial changes",
+      "impact_if_unanswered": "Workers may either over-create review beads or silently skip needed reviews"
+    }
+  },
+  "review_request": {
+    "thread_id": "hermes-tailchat-example",
+    "subject": "[review-request][hermes-tailchat-example] Need reviewer pass",
+    "body": {
+      "goal": "Review AGENTS guidance and message-fixture docs",
+      "state": "Implementation committed locally with bead refs",
+      "affected_files": [
+        "docs/design/2026-04-13-hermes-codex-multi-agent-coordination.md",
+        "docs/agents/codex-worker-AGENTS.md"
+      ],
+      "tests_run": [
+        "pytest -q tests/test_multi_agent_design_artifacts.py"
+      ],
+      "ask": "Confirm guidance completeness and identify any missing review/test traceability rules"
+    }
+  },
+  "lesson": {
+    "thread_id": "hermes-tailchat-example",
+    "subject": "[lesson][hermes-tailchat-example] Reusable traceability pitfall",
+    "body": {
+      "problem": "Agents marked beads done before opening a PR/MR required by repo policy",
+      "resolution": "Codex worker guidance now states a bead is not done without required git artifact evidence",
+      "reusable_rule": "Definition of done must include the required git artifact, not just code changes",
+      "suggested_destination": "AGENTS"
+    }
+  }
+}
