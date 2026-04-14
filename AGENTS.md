@@ -28,11 +28,14 @@ Current design center:
    - `docs/agents/codex-worker-AGENTS.md`
    - `docs/agents/codex-reviewer-AGENTS.md`
    - `docs/agents/hermes-overseer-AGENTS.md`
-4. Check the current beads state:
+4. Check the current beads state using robot-safe tooling:
+   - `bv --recipe actionable --robot-plan`
+   - `bv --robot-next`
    - `br ready --json`
    - `br show BEAD_ID --json`
 5. Claim the bead before substantial work:
    - `br update BEAD_ID --status in_progress`
+6. If `am` is unavailable, do not rely on shared-checkout coordination alone for overlapping edits; use an isolated worktree for write-heavy tasks.
 
 ## Planning / execution conventions
 
@@ -57,7 +60,7 @@ Examples:
 - `feat/hermes-tailchat-qvf-reconnect-resume`
 
 ### Commit traceability
-Commit bodies should ideally include bead references.
+Commit bodies for meaningful work should include bead references.
 
 Preferred footer format:
 
@@ -109,8 +112,10 @@ then be extra conservative and document the security impact.
 Current intended merge model:
 - protected `main`
 - required checks
-- no required human approval for routine solo-maintainer flow
-- auto-merge permitted after checks pass
+- pull requests are the normal merge path
+- review is required before merge per `docs/policies/branch-protection-and-pr-flow.md`
+- Codex/Hermes sidecar review improves bead readiness but does not replace repository branch protection by itself
+- auto-merge permitted only after the required review and checks pass
 
 Do not weaken this casually.
 If you change merge/security policy, update:
@@ -154,10 +159,12 @@ python3 scripts/traceability_report.py main..HEAD
 
 ## When closing work
 
-1. Update bead status.
+1. Update bead status only after the slice has the required evidence.
 2. `br sync --flush-only`
-3. Commit with bead references where possible.
-4. Push branch.
-5. Open/update PR.
+3. Commit with bead references.
+4. Record the exact tests/validation run.
+5. Push branch.
+6. Open/update PR.
+7. If the slice is non-trivial, make sure sidecar review disposition is recorded before treating it as done.
 
 If the work changes policy, workflow, or release behavior, make sure the docs are updated in the same branch.
