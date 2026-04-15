@@ -178,3 +178,16 @@ def test_mobile_reconnect_hooks_and_cursor_replay_are_present() -> None:
     assert "window.addEventListener('pageshow'" in html
     assert 'events?after_id=${lastEventId}' in html
     assert "setStatus('reconnecting');" in html
+
+
+
+def test_pending_approval_modal_and_conflict_recovery_ui_are_present() -> None:
+    html = INDEX_HTML.read_text()
+
+    assert 'id="approvalModal"' in html
+    assert 'Approval required. Hermes is waiting for your decision.' in html
+    assert 'showApprovalModal(approval);' in html
+    assert 'approvalDismissEl.onclick' in html
+    assert "setStatus('approval required');" in html
+    assert 'if (res.status === 409)' in html
+    assert 'await refreshCurrentChatState();' in html

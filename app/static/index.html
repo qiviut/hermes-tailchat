@@ -169,6 +169,57 @@
       grid-template-columns: 1fr 1fr;
       gap: 8px;
     }
+    .approval-modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(2, 6, 23, 0.82);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      z-index: 50;
+    }
+    .approval-modal.open {
+      display: flex;
+    }
+    .approval-dialog {
+      width: min(680px, 100%);
+      max-height: min(90dvh, 720px);
+      overflow: auto;
+      background: #0b1220;
+      border: 1px solid #475569;
+      border-radius: 16px;
+      box-shadow: 0 24px 80px rgba(15, 23, 42, 0.55);
+      padding: 18px;
+      display: grid;
+      gap: 12px;
+    }
+    .approval-dialog h2 {
+      margin: 0;
+      font-size: 20px;
+    }
+    .approval-dialog pre {
+      margin: 0;
+      padding: 12px;
+      border-radius: 10px;
+      background: #020617;
+      border: 1px solid #334155;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .approval-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .approval-banner {
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: #7c2d12;
+      color: #ffedd5;
+      border: 1px solid #ea580c;
+      font-size: 14px;
+    }
 
     @media (max-width: 900px) {
       .wrap {
@@ -229,6 +280,9 @@
       }
       .messages {
         gap: 10px;
+      }
+      .approval-actions {
+        grid-template-columns: 1fr;
       }
     }
 
@@ -300,6 +354,21 @@ Ctrl/Cmd+Enter to send. Shift+Ctrl/Cmd+Enter to queue as a background job."></te
       </div>
     </div>
   </div>
+  <div id="approvalModal" class="approval-modal" aria-live="assertive" aria-modal="true" role="dialog">
+    <div class="approval-dialog">
+      <div class="approval-banner">Approval required. Hermes is waiting for your decision.</div>
+      <h2 id="approvalModalTitle">Pending approval</h2>
+      <div id="approvalModalSummary" class="meta"></div>
+      <pre id="approvalModalCommand"></pre>
+      <div id="approvalModalDetails" class="meta"></div>
+      <div id="approvalModalStatus" class="meta"></div>
+      <div class="approval-actions">
+        <button id="approvalApprove">Approve and continue</button>
+        <button id="approvalDeny" class="secondary">Deny</button>
+      </div>
+      <button id="approvalDismiss" class="secondary">Dismiss for now</button>
+    </div>
+  </div>
 <script>
 let currentChat = null;
 let eventSource = null;
@@ -311,6 +380,15 @@ const jobsEl = document.getElementById('jobs');
 const approvalsEl = document.getElementById('approvals');
 const statusEl = document.getElementById('status');
 const sessionMetaEl = document.getElementById('sessionMeta');
+const approvalModalEl = document.getElementById('approvalModal');
+const approvalModalTitleEl = document.getElementById('approvalModalTitle');
+const approvalModalSummaryEl = document.getElementById('approvalModalSummary');
+const approvalModalCommandEl = document.getElementById('approvalModalCommand');
+const approvalModalDetailsEl = document.getElementById('approvalModalDetails');
+const approvalModalStatusEl = document.getElementById('approvalModalStatus');
+const approvalApproveEl = document.getElementById('approvalApprove');
+const approvalDenyEl = document.getElementById('approvalDeny');
+const approvalDismissEl = document.getElementById('approvalDismiss');
 const attachPanelEl = document.getElementById('attachPanel');
 const attachListEl = document.getElementById('attachList');
 const attachStatusEl = document.getElementById('attachStatus');
@@ -318,6 +396,8 @@ const attachTitleOverrideEl = document.getElementById('attachTitleOverride');
 const backgroundExecutorEl = document.getElementById('backgroundExecutor');
 let attachableSessions = [];
 let selectedAttachSessionId = null;
+let currentPendingApproval = null;
+let approvalModalDismissed = false;
 const basePath = (() => {
   const path = window.location.pathname;
   return path.startsWith('/hermes') ? '/hermes' : '';
@@ -325,6 +405,72 @@ const basePath = (() => {
 const apiUrl = (path) => `${basePath}${path}`;
 
 function setStatus(text) { statusEl.textContent = text; }
+
+function formatApprovalDetails(approval) {
+  const details = approval.details || {};
+  const parts = [];
+  if (details.session_id) parts.push(`session ${details.session_id}`);
+  if (approval.run_id) parts.push(`run ${approval.run_id}`);
+  if (Array.isArray(details.pattern_keys) && details.pattern_keys.length) parts.push(`checks: ${details.pattern_keys.join(', ')}`);
+  return parts.join(' · ');
+}
+
+function closeApprovalModal() {
+  approvalModalEl.classList.remove('open');
+}
+
+function showApprovalModal(approval) {
+  currentPendingApproval = approval;
+  approvalModalTitleEl.textContent = 'Approval required';
+  approvalModalSummaryEl.textContent = approval.summary || approval.details?.description || 'Hermes needs approval to continue.';
+  approvalModalCommandEl.textContent = approval.details?.command || approval.details?.description || approval.summary || 'No command preview available.';
+  approvalModalDetailsEl.textContent = formatApprovalDetails(approval) || 'Hermes is paused until you choose Approve or Deny.';
+  approvalModalStatusEl.textContent = `Status: ${approval.status}`;
+  approvalModalEl.classList.add('open');
+}
+
+function syncApprovalModal(approvals) {
+  const pending = approvals.find(approval => approval.status === 'pending') || null;
+  currentPendingApproval = pending;
+  if (!pending) {
+    approvalModalDismissed = false;
+    closeApprovalModal();
+    return;
+  }
+  if (!approvalModalDismissed) showApprovalModal(pending);
+}
+
+function renderApprovalsList(approvals) {
+  approvalsEl.innerHTML = '';
+  if (!approvals.length) {
+    approvalsEl.innerHTML = '<div class="meta">No approvals observed yet</div>';
+    syncApprovalModal([]);
+    return;
+  }
+  for (const approval of approvals) {
+    const div = document.createElement('div');
+    div.className = 'approval';
+    const command = approval.details?.command ? `<div class="meta">${approval.details.command}</div>` : '';
+    div.innerHTML = `<div>${approval.summary}</div><div class="meta">${approval.status}</div>${command}`;
+    if (approval.status === 'pending') {
+      const approve = document.createElement('button');
+      approve.textContent = 'Approve';
+      approve.onclick = () => resolveApproval(approval.id, 'approved');
+      const deny = document.createElement('button');
+      deny.textContent = 'Deny';
+      deny.className = 'secondary';
+      deny.onclick = () => resolveApproval(approval.id, 'denied');
+      div.appendChild(approve);
+      div.appendChild(deny);
+      div.onclick = () => {
+        approvalModalDismissed = false;
+        showApprovalModal(approval);
+      };
+    }
+    approvalsEl.appendChild(div);
+  }
+  syncApprovalModal(approvals);
+}
 
 function renderSessionMeta(chat) {
   if (!chat || !chat.hermes_session_id) {
@@ -475,33 +621,29 @@ async function loadApprovals() {
   if (!currentChat) return;
   const res = await fetch(apiUrl(`/api/conversations/${currentChat}/approvals`));
   const approvals = await res.json();
-  approvalsEl.innerHTML = '';
-  if (!approvals.length) {
-    approvalsEl.innerHTML = '<div class="meta">No approvals observed yet</div>';
-    return;
-  }
-  for (const approval of approvals) {
-    const div = document.createElement('div');
-    div.className = 'approval';
-    div.innerHTML = `<div>${approval.summary}</div><div class="meta">${approval.status}</div>`;
-    if (approval.status === 'pending') {
-      const approve = document.createElement('button');
-      approve.textContent = 'Approve';
-      approve.onclick = () => resolveApproval(approval.id, 'approved');
-      const deny = document.createElement('button');
-      deny.textContent = 'Deny';
-      deny.className = 'secondary';
-      deny.onclick = () => resolveApproval(approval.id, 'denied');
-      div.appendChild(approve);
-      div.appendChild(deny);
-    }
-    approvalsEl.appendChild(div);
-  }
+  renderApprovalsList(approvals);
 }
 
 async function resolveApproval(id, resolution) {
-  await fetch(apiUrl(`/api/approvals/${id}/resolve`), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({resolution})});
-  await loadApprovals();
+  approvalModalStatusEl.textContent = `Resolving approval (${resolution})…`;
+  approvalApproveEl.disabled = true;
+  approvalDenyEl.disabled = true;
+  const res = await fetch(apiUrl(`/api/approvals/${id}/resolve`), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({resolution})});
+  approvalApproveEl.disabled = false;
+  approvalDenyEl.disabled = false;
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    approvalModalStatusEl.textContent = error.detail?.message || error.detail || 'Failed to resolve approval.';
+    return;
+  }
+  const payload = await res.json();
+  if (payload.replay) {
+    setStatus('approval resolved · replaying');
+  } else {
+    setStatus('approval resolved');
+  }
+  approvalModalDismissed = false;
+  await refreshCurrentChatState();
 }
 
 function clearReconnectTimer() {
@@ -529,28 +671,7 @@ async function refreshCurrentChatState() {
     const artifactDir = job.artifact_dir ? `<div class="meta">artifacts ${job.artifact_dir}</div>` : '';
     return `<div class="job"><div>${job.prompt}</div><div class="meta">${job.executor || 'hermes'} · ${job.status} · run_after ${job.run_after}${thread}</div>${artifactDir}</div>`;
   }).join('') || '<div class="meta">No jobs yet</div>';
-  approvalsEl.innerHTML = '';
-  if (!approvals.length) {
-    approvalsEl.innerHTML = '<div class="meta">No approvals observed yet</div>';
-  } else {
-    for (const approval of approvals) {
-      const div = document.createElement('div');
-      div.className = 'approval';
-      div.innerHTML = `<div>${approval.summary}</div><div class="meta">${approval.status}</div>`;
-      if (approval.status === 'pending') {
-        const approve = document.createElement('button');
-        approve.textContent = 'Approve';
-        approve.onclick = () => resolveApproval(approval.id, 'approved');
-        const deny = document.createElement('button');
-        deny.textContent = 'Deny';
-        deny.className = 'secondary';
-        deny.onclick = () => resolveApproval(approval.id, 'denied');
-        div.appendChild(approve);
-        div.appendChild(deny);
-      }
-      approvalsEl.appendChild(div);
-    }
-  }
+  renderApprovalsList(approvals);
 }
 
 async function applyEvent(event) {
@@ -578,6 +699,7 @@ async function applyEvent(event) {
     appendToolEvent(`${event.event}: ${(event.job && event.job.prompt) || ''}`);
   }
   if (event.event === 'approval.created' || event.event === 'approval.resolved' || event.event === 'approval.waiting') {
+    if (event.event !== 'approval.resolved') setStatus('approval required');
     await loadApprovals();
     appendToolEvent(event.event);
   }
@@ -663,11 +785,27 @@ async function sendMessage(background = false) {
   input.value = '';
   setStatus(background ? 'job queued' : 'running');
   if (background) {
-    await fetch(apiUrl(`/api/conversations/${currentChat}/jobs`), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({prompt: content, delay_seconds: 0, executor: backgroundExecutorEl.value})});
+    const res = await fetch(apiUrl(`/api/conversations/${currentChat}/jobs`), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({prompt: content, delay_seconds: 0, executor: backgroundExecutorEl.value})});
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({}));
+      setStatus(error.detail?.message || error.detail || 'failed to queue job');
+      return;
+    }
     await loadJobs();
     return;
   }
-  await fetch(apiUrl(`/api/conversations/${currentChat}/messages`), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({content})});
+  const res = await fetch(apiUrl(`/api/conversations/${currentChat}/messages`), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({content})});
+  if (res.status === 409) {
+    const error = await res.json().catch(() => ({}));
+    setStatus(error.detail?.status || 'approval required');
+    approvalModalDismissed = false;
+    await refreshCurrentChatState();
+    return;
+  }
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    setStatus(error.detail?.message || error.detail || 'send failed');
+  }
 }
 
 document.getElementById('newChat').onclick = newChat;
@@ -676,6 +814,19 @@ document.getElementById('confirmAttach').onclick = confirmAttach;
 document.getElementById('cancelAttach').onclick = closeAttachPanel;
 document.getElementById('send').onclick = () => sendMessage(false);
 document.getElementById('background').onclick = () => sendMessage(true);
+approvalApproveEl.onclick = () => currentPendingApproval && resolveApproval(currentPendingApproval.id, 'approved');
+approvalDenyEl.onclick = () => currentPendingApproval && resolveApproval(currentPendingApproval.id, 'denied');
+approvalDismissEl.onclick = () => {
+  approvalModalDismissed = true;
+  closeApprovalModal();
+  setStatus('approval required');
+};
+approvalModalEl.addEventListener('click', (event) => {
+  if (event.target === approvalModalEl) {
+    approvalModalDismissed = true;
+    closeApprovalModal();
+  }
+});
 document.getElementById('input').addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
     e.preventDefault();
