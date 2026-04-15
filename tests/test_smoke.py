@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import os
 import sys
@@ -17,16 +18,40 @@ class DummyHermesProviderError(RuntimeError):
 class DummyLocalHermesProvider:
     titles: dict[str, str] = {}
     session_messages: dict[str, list[dict]] = {}
+    scripted_events: list[dict] | None = None
+    pending_approvals: dict[str, dict] = {}
 
     async def run_turn(self, session_id, conversation_history, user_message, on_event):
+        if self.scripted_events is not None:
+            for event in self.scripted_events:
+                await on_event(dict(event))
+            return
         await on_event({"event": "run.completed", "output": f"dummy response for: {user_message}"})
 
+    async def rehydrate_pending_approvals(self, approvals):
+        self.pending_approvals = {}
+        for item in approvals:
+            details = item.get('details', {})
+            provider_approval_id = details.get('approval_id', item['id'])
+            self.pending_approvals[provider_approval_id] = {
+                'session_id': details.get('session_id'),
+                'restored': True,
+            }
+
     async def resolve_approval(self, approval_id, decision):
-        return {
+        restored = self.pending_approvals.pop(approval_id, None)
+        payload = {
             "approval_id": approval_id,
             "decision": decision,
             "resolved_count": 1,
         }
+        if restored:
+            payload.update({
+                'session_id': restored.get('session_id'),
+                'restored': True,
+                'resume_required': True,
+            })
+        return payload
 
     async def set_session_title(self, session_id, title):
         for existing_session_id, existing_title in self.titles.items():
@@ -70,6 +95,8 @@ def load_app(tmp_path: Path):
     os.environ["TAILCHAT_DB_PATH"] = str(db_path)
     os.environ.setdefault("HERMES_API_KEY", "test-key")
     DummyLocalHermesProvider.titles = {}
+    DummyLocalHermesProvider.scripted_events = None
+    DummyLocalHermesProvider.pending_approvals = {}
     DummyLocalHermesProvider.session_messages = {
         'existing-alpha': [
             {'id': 1, 'role': 'user', 'content': 'hello from cli', 'timestamp': 10.0},
@@ -147,6 +174,7 @@ def test_job_creation_works_through_hermes_prefix(tmp_path: Path):
         assert queued.status_code == 200
         job = queued.json()
         assert job["prompt"] == "background smoke"
+        assert job["executor"] == "hermes"
 
         jobs = client.get(f"/api/conversations/{convo['id']}/jobs")
         assert jobs.status_code == 200
@@ -335,3 +363,193 @@ def test_attached_import_cursor_allows_new_external_turns(tmp_path: Path):
         second = client.get(f"/api/conversations/{convo['id']}/messages")
         contents = [item['content'] for item in second.json()]
         assert contents == ['beta question', 'beta answer', 'later external note']
+
+
+def test_startup_recovery_marks_incomplete_runs_jobs_and_preserves_pending_approvals(tmp_path: Path):
+    import sqlite3
+
+    db_path = tmp_path / "tailchat-test.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'complete', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE runs (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, trigger_type TEXT NOT NULL, trigger_text TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'queued', assistant_message_id TEXT, job_id TEXT, error_text TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE jobs (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, prompt TEXT NOT NULL, executor TEXT NOT NULL DEFAULT 'hermes', status TEXT NOT NULL DEFAULT 'pending', delay_seconds INTEGER NOT NULL DEFAULT 0, run_after TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, lease_until TEXT, claimed_by TEXT, result_message_id TEXT, artifact_dir TEXT, metadata_json TEXT NOT NULL DEFAULT '{}', error_text TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE approvals (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, run_id TEXT, status TEXT NOT NULL DEFAULT 'pending', summary TEXT NOT NULL, details_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, resolved_at TEXT, resolution TEXT);
+        CREATE TABLE run_events (id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id TEXT NOT NULL, run_id TEXT, event_type TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        """
+    )
+    conn.execute("INSERT INTO conversations (id, title) VALUES (?, ?)", ("c1", "Recovered convo"))
+    conn.execute("INSERT INTO messages (id, conversation_id, role, content, status) VALUES (?, ?, ?, ?, ?)", ("m1", "c1", "assistant", "partial output", "streaming"))
+    conn.execute("INSERT INTO runs (id, conversation_id, trigger_type, status, assistant_message_id) VALUES (?, ?, ?, ?, ?)", ("r1", "c1", "user_message", "running", "m1"))
+    conn.execute("INSERT INTO jobs (id, conversation_id, prompt, status, run_after, metadata_json) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, '{}')", ("j1", "c1", "do thing", "running"))
+    conn.execute("INSERT INTO approvals (id, conversation_id, run_id, status, summary, details_json) VALUES (?, ?, ?, ?, ?, '{}')", ("a1", "c1", "r1", "pending", "needs approval"))
+    conn.commit()
+    conn.close()
+
+    app, _db_path = load_app(tmp_path)
+
+    with TestClient(app) as client:
+        health = client.get('/health')
+        assert health.status_code == 200
+        recovery = health.json()['startup_recovery_summary']
+        assert recovery['runs'] == 1
+        assert recovery['jobs'] == 1
+        assert recovery['approvals'] == 1
+        assert recovery['messages'] == 1
+
+        messages = client.get('/api/conversations/c1/messages').json()
+        assert messages[0]['status'] == 'error'
+        assert 'Tailchat interrupted this run during a restart' in messages[0]['content']
+
+        approvals = client.get('/api/conversations/c1/approvals').json()
+        assert approvals[0]['status'] == 'pending'
+
+
+def test_resolving_rehydrated_approval_retries_interrupted_run(tmp_path: Path):
+    import sqlite3
+
+    db_path = tmp_path / "tailchat-test.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL, hermes_session_id TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'complete', metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE runs (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, trigger_type TEXT NOT NULL, trigger_text TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'queued', assistant_message_id TEXT, job_id TEXT, error_text TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE jobs (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, prompt TEXT NOT NULL, executor TEXT NOT NULL DEFAULT 'hermes', status TEXT NOT NULL DEFAULT 'pending', delay_seconds INTEGER NOT NULL DEFAULT 0, run_after TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, lease_until TEXT, claimed_by TEXT, result_message_id TEXT, artifact_dir TEXT, metadata_json TEXT NOT NULL DEFAULT '{}', error_text TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE approvals (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, run_id TEXT, status TEXT NOT NULL DEFAULT 'pending', summary TEXT NOT NULL, details_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, resolved_at TEXT, resolution TEXT);
+        CREATE TABLE run_events (id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id TEXT NOT NULL, run_id TEXT, event_type TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        """
+    )
+    conn.execute("INSERT INTO conversations (id, title, hermes_session_id) VALUES (?, ?, ?)", ("c1", "Recovered approval convo", "session-1"))
+    conn.execute("INSERT INTO messages (id, conversation_id, role, content, status, metadata_json) VALUES (?, ?, ?, ?, ?, '{}')", ("u1", "c1", "user", "please continue", "complete"))
+    conn.execute("INSERT INTO messages (id, conversation_id, role, content, status, metadata_json) VALUES (?, ?, ?, ?, ?, '{}')", ("m1", "c1", "assistant", "[Tailchat interrupted this run during a restart. Please retry.]", "error"))
+    conn.execute(
+        "INSERT INTO runs (id, conversation_id, trigger_type, trigger_text, status, assistant_message_id, error_text) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("r1", "c1", "user_message", "please continue", "waiting_approval", "m1", ""),
+    )
+    conn.execute(
+        "INSERT INTO approvals (id, conversation_id, run_id, status, summary, details_json) VALUES (?, ?, ?, ?, ?, ?)",
+        ("a1", "c1", "r1", "pending", "needs approval", '{"approval_id":"provider-a1","session_id":"session-1","pattern_keys":["shell command via -c/-lc flag"],"command":"bash -lc echo hi","description":"Dangerous command requires approval"}'),
+    )
+    conn.commit()
+    conn.close()
+
+    app, _db_path = load_app(tmp_path)
+    DummyLocalHermesProvider.scripted_events = [{'event': 'run.completed', 'output': 'replayed after restart'}]
+
+    with TestClient(app) as client:
+        resolved = client.post('/api/approvals/a1/resolve', json={'resolution': 'approved'})
+        assert resolved.status_code == 200
+        body = resolved.json()
+        assert body['approval']['status'] == 'resolved'
+        assert body['provider_result']['restored'] is True
+        assert body['replay'] is not None
+
+        for _ in range(50):
+            messages = client.get('/api/conversations/c1/messages').json()
+            if any(message['content'] == 'replayed after restart' for message in messages):
+                break
+            time.sleep(0.01)
+        messages = client.get('/api/conversations/c1/messages').json()
+        assert any(message['content'] == 'replayed after restart' and message['status'] == 'complete' for message in messages)
+
+
+
+def test_post_message_marks_run_waiting_approval_when_approval_requested(tmp_path: Path):
+    app, _db_path = load_app(tmp_path)
+    DummyLocalHermesProvider.scripted_events = [
+        {'event': 'approval.requested', 'approval': {'description': 'Dangerous command requires approval', 'command': 'rm -rf /tmp/nope'}},
+    ]
+
+    with TestClient(app) as client:
+        convo = client.post('/api/conversations', json={'title': 'Approval chat'}).json()
+        posted = client.post(f"/api/conversations/{convo['id']}/messages", json={'content': 'please ask approval'})
+        assert posted.status_code == 200
+        run_id = posted.json()['run_id']
+        for _ in range(30):
+            approvals = client.get(f"/api/conversations/{convo['id']}/approvals").json()
+            if approvals:
+                break
+            time.sleep(0.01)
+        approvals = client.get(f"/api/conversations/{convo['id']}/approvals").json()
+        assert approvals
+        import app.main as main_module
+        run = main_module.store.get_run(run_id)
+        assert run['status'] == 'waiting_approval'
+
+
+
+def test_post_message_rejects_second_foreground_run_while_first_is_active(tmp_path: Path):
+    app, _db_path = load_app(tmp_path)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_run_turn(session_id, conversation_history, user_message, on_event):
+        started.set()
+        await release.wait()
+        await on_event({'event': 'run.completed', 'output': f'done: {user_message}'})
+
+    import app.main as main_module
+    main_module.hermes.run_turn = blocked_run_turn
+
+    with TestClient(app) as client:
+        convo = client.post('/api/conversations', json={'title': 'Serialized chat'}).json()
+        first = client.post(f"/api/conversations/{convo['id']}/messages", json={'content': 'first'})
+        assert first.status_code == 200
+        for _ in range(50):
+            if started.is_set():
+                break
+            time.sleep(0.01)
+        assert started.is_set()
+
+        second = client.post(f"/api/conversations/{convo['id']}/messages", json={'content': 'second'})
+        assert second.status_code == 409
+        payload = second.json()['detail']
+        assert payload['status'] in {'queued', 'running', 'waiting_approval'}
+        assert payload['run_id'] == first.json()['run_id']
+
+        release.set()
+        for _ in range(50):
+            messages = client.get(f"/api/conversations/{convo['id']}/messages").json()
+            if any(message['role'] == 'assistant' and message['status'] == 'complete' for message in messages):
+                break
+            time.sleep(0.01)
+        messages = client.get(f"/api/conversations/{convo['id']}/messages").json()
+        assert any(message['content'] == 'done: first' for message in messages)
+
+
+
+def test_event_history_supports_after_id_cursor(tmp_path: Path):
+    app, _db_path = load_app(tmp_path)
+
+    with TestClient(app) as client:
+        convo = client.post('/api/conversations', json={'title': 'Cursor chat'}).json()
+        first = client.post(f"/api/conversations/{convo['id']}/messages", json={'content': 'first'})
+        assert first.status_code == 200
+        for _ in range(30):
+            history = client.get(f"/api/conversations/{convo['id']}/events/history?limit=20").json()
+            if history:
+                break
+            time.sleep(0.01)
+        history = client.get(f"/api/conversations/{convo['id']}/events/history?limit=20").json()
+        assert len(history) >= 2
+        cursor = history[0]['id']
+        later = client.get(f"/api/conversations/{convo['id']}/events/history?after_id={cursor}&limit=20")
+        assert later.status_code == 200
+        later_events = later.json()
+        assert all(item['id'] > cursor for item in later_events)
+        assert any(item['payload']['event'] == 'message.completed' for item in later_events)
+
+
+def test_resolving_non_pending_approval_returns_conflict(tmp_path: Path):
+    app, _db_path = load_app(tmp_path)
+
+    with TestClient(app) as client:
+        convo = client.post('/api/conversations', json={'title': 'Expired approval chat'}).json()
+        import app.main as main_module
+        approval = main_module.store.create_approval(convo['id'], 'stale approval', {'approval_id': 'provider-1'})
+        main_module.store.update_approval_status(approval['id'], 'expired', 'restart')
+        resolved = client.post(f"/api/approvals/{approval['id']}/resolve", json={'resolution': 'approved'})
+        assert resolved.status_code == 409

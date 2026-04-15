@@ -107,7 +107,7 @@ def test_mobile_portrait_layout_rules_are_present() -> None:
     assert "grid-template-columns: 1fr;" in tablet_block
     assert "grid-template-rows: auto minmax(0, 1fr);" in tablet_block
     assert "border-bottom: 1px solid #374151;" in tablet_block
-    assert "grid-template-columns: 1fr 1fr;" in tablet_block
+    assert "grid-template-columns: 1fr 1fr 1fr;" in tablet_block
     assert "grid-column: 1 / -1;" in tablet_block
 
     assert "grid-template-columns: 1fr;" in phone_block
@@ -123,7 +123,7 @@ def test_mobile_landscape_layout_rules_are_present() -> None:
     assert "grid-template-rows: none;" in landscape_block
     assert "border-right: 1px solid #374151;" in landscape_block
     assert "border-bottom: 0;" in landscape_block
-    assert "grid-template-columns: minmax(0, 1fr) auto auto;" in landscape_block
+    assert "grid-template-columns: minmax(0, 1fr) minmax(140px, 180px) auto auto;" in landscape_block
     assert "grid-column: auto;" in landscape_block
 
 
@@ -156,3 +156,25 @@ def test_attach_session_picker_handles_load_failures() -> None:
     assert "if (!res.ok || !Array.isArray(payload))" in html
     assert "attachStatusEl.textContent = payload.detail || 'Failed to load Hermes sessions.';" in html
     assert "Failed to load Hermes sessions:" in html
+
+
+def test_background_executor_picker_is_present() -> None:
+    html = INDEX_HTML.read_text()
+
+    assert 'id="backgroundExecutor"' in html
+    assert '>Hermes job<' in html
+    assert '>Codex job<' in html
+    assert 'executor: backgroundExecutorEl.value' in html
+
+
+def test_mobile_reconnect_hooks_and_cursor_replay_are_present() -> None:
+    html = INDEX_HTML.read_text()
+
+    assert 'let lastEventId = null;' in html
+    assert 'eventSource.onerror = () => {' in html
+    assert "document.addEventListener('visibilitychange'" in html
+    assert "window.addEventListener('online'" in html
+    assert "window.addEventListener('offline'" in html
+    assert "window.addEventListener('pageshow'" in html
+    assert 'events?after_id=${lastEventId}' in html
+    assert "setStatus('reconnecting');" in html

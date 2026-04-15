@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import Any
 
 
+RESTART_INTERRUPTED_ERROR = 'Interrupted by Tailchat restart before completion.'
+RESTART_INTERRUPTED_NOTE = '[Tailchat interrupted this run during a restart. Please retry.]'
+
+
 class Store:
     def __init__(self, db_path: Path) -> None:
         self.db_path = Path(db_path)
@@ -62,12 +66,15 @@ class Store:
                 id TEXT PRIMARY KEY,
                 conversation_id TEXT NOT NULL,
                 prompt TEXT NOT NULL,
+                executor TEXT NOT NULL DEFAULT 'hermes',
                 status TEXT NOT NULL DEFAULT 'pending',
                 delay_seconds INTEGER NOT NULL DEFAULT 0,
                 run_after TEXT NOT NULL,
                 lease_until TEXT,
                 claimed_by TEXT,
                 result_message_id TEXT,
+                artifact_dir TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
                 error_text TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -110,6 +117,9 @@ class Store:
             self._ensure_column(conn, 'runs', 'job_id', 'TEXT')
             self._ensure_column(conn, 'runs', 'error_text', "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, 'jobs', 'result_message_id', 'TEXT')
+            self._ensure_column(conn, 'jobs', 'executor', "TEXT NOT NULL DEFAULT 'hermes'")
+            self._ensure_column(conn, 'jobs', 'artifact_dir', 'TEXT')
+            self._ensure_column(conn, 'jobs', 'metadata_json', "TEXT NOT NULL DEFAULT '{}'" )
             self._ensure_column(conn, 'jobs', 'error_text', "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, 'run_events', 'run_id', 'TEXT')
 
@@ -311,6 +321,33 @@ class Store:
             row = conn.execute('SELECT * FROM runs WHERE id = ?', (run_id,)).fetchone()
             return dict(row) if row else {}
 
+    def list_pending_approvals(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM approvals WHERE status = 'pending' ORDER BY created_at, id"
+            ).fetchall()
+            items = []
+            for row in rows:
+                item = dict(row)
+                item['details'] = json.loads(item.pop('details_json') or '{}')
+                items.append(item)
+            return items
+
+    def get_active_run(self, conversation_id: str, trigger_type: str | None = None) -> dict[str, Any] | None:
+        query = """
+            SELECT * FROM runs
+            WHERE conversation_id = ?
+              AND status IN ('queued', 'running', 'waiting_approval')
+        """
+        args: list[Any] = [conversation_id]
+        if trigger_type is not None:
+            query += ' AND trigger_type = ?'
+            args.append(trigger_type)
+        query += ' ORDER BY created_at DESC, id DESC LIMIT 1'
+        with self._connect() as conn:
+            row = conn.execute(query, args).fetchone()
+            return dict(row) if row else None
+
     def update_run(self, run_id: str, *, status: str | None = None, error_text: str | None = None, assistant_message_id: str | None = None) -> None:
         parts = []
         args: list[Any] = []
@@ -334,20 +371,33 @@ class Store:
                 'SELECT * FROM jobs WHERE conversation_id = ? ORDER BY created_at DESC, id DESC',
                 (conversation_id,),
             ).fetchall()
-            return [dict(r) for r in rows]
+            return [self._job_payload(r) for r in rows]
 
-    def create_job(self, conversation_id: str, prompt: str, delay_seconds: int = 0) -> dict[str, Any]:
+    def _job_payload(self, row: sqlite3.Row | None) -> dict[str, Any]:
+        if row is None:
+            return {}
+        item = dict(row)
+        item['metadata'] = json.loads(item.pop('metadata_json', '{}') or '{}')
+        return item
+
+    def get_job(self, job_id: str) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute('SELECT * FROM jobs WHERE id = ?', (job_id,)).fetchone()
+            return self._job_payload(row)
+
+    def create_job(self, conversation_id: str, prompt: str, delay_seconds: int = 0, executor: str = 'hermes', metadata: dict[str, Any] | None = None) -> dict[str, Any]:
         job_id = uuid.uuid4().hex
+        payload = json.dumps(metadata or {})
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO jobs (id, conversation_id, prompt, delay_seconds, run_after)
-                VALUES (?, ?, ?, ?, datetime('now', printf('+%d seconds', ?)))
+                INSERT INTO jobs (id, conversation_id, prompt, executor, delay_seconds, run_after, metadata_json)
+                VALUES (?, ?, ?, ?, ?, datetime('now', printf('+%d seconds', ?)), ?)
                 """,
-                (job_id, conversation_id, prompt, delay_seconds, delay_seconds),
+                (job_id, conversation_id, prompt, executor, delay_seconds, delay_seconds, payload),
             )
             row = conn.execute('SELECT * FROM jobs WHERE id = ?', (job_id,)).fetchone()
-            return dict(row)
+            return self._job_payload(row)
 
     def claim_due_jobs(self, worker_id: str, limit: int = 5) -> list[dict[str, Any]]:
         with self._connect() as conn:
@@ -378,10 +428,10 @@ class Store:
                     (worker_id, job_id),
                 )
                 if updated.rowcount:
-                    claimed.append(dict(conn.execute('SELECT * FROM jobs WHERE id = ?', (job_id,)).fetchone()))
+                    claimed.append(self._job_payload(conn.execute('SELECT * FROM jobs WHERE id = ?', (job_id,)).fetchone()))
             return claimed
 
-    def update_job(self, job_id: str, *, status: str | None = None, error_text: str | None = None, result_message_id: str | None = None) -> None:
+    def update_job(self, job_id: str, *, status: str | None = None, error_text: str | None = None, result_message_id: str | None = None, artifact_dir: str | None = None, metadata: dict[str, Any] | None = None) -> None:
         parts = []
         args: list[Any] = []
         if status is not None:
@@ -393,6 +443,12 @@ class Store:
         if result_message_id is not None:
             parts.append('result_message_id = ?')
             args.append(result_message_id)
+        if artifact_dir is not None:
+            parts.append('artifact_dir = ?')
+            args.append(artifact_dir)
+        if metadata is not None:
+            parts.append('metadata_json = ?')
+            args.append(json.dumps(metadata))
         if status in {'complete', 'error'}:
             parts.append('lease_until = NULL')
         parts.append("updated_at = CURRENT_TIMESTAMP")
@@ -423,6 +479,15 @@ class Store:
                 items.append(item)
             return items
 
+    def get_approval(self, approval_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute('SELECT * FROM approvals WHERE id = ?', (approval_id,)).fetchone()
+            if not row:
+                return None
+            item = dict(row)
+            item['details'] = json.loads(item.pop('details_json') or '{}')
+            return item
+
     def resolve_approval(self, approval_id: str, resolution: str) -> dict[str, Any] | None:
         with self._connect() as conn:
             conn.execute(
@@ -436,24 +501,87 @@ class Store:
             item['details'] = json.loads(item.pop('details_json') or '{}')
             return item
 
-    def append_run_event(self, conversation_id: str, run_id: str | None, event_type: str, payload_json: str) -> None:
+    def update_approval_status(self, approval_id: str, status: str, resolution: str | None = None) -> dict[str, Any] | None:
         with self._connect() as conn:
             conn.execute(
+                'UPDATE approvals SET status = ?, resolved_at = CURRENT_TIMESTAMP, resolution = ? WHERE id = ?',
+                (status, resolution, approval_id),
+            )
+            row = conn.execute('SELECT * FROM approvals WHERE id = ?', (approval_id,)).fetchone()
+            if not row:
+                return None
+            item = dict(row)
+            item['details'] = json.loads(item.pop('details_json') or '{}')
+            return item
+
+    def append_run_event(self, conversation_id: str, run_id: str | None, event_type: str, payload_json: str) -> int:
+        with self._connect() as conn:
+            cursor = conn.execute(
                 'INSERT INTO run_events (conversation_id, run_id, event_type, payload_json) VALUES (?, ?, ?, ?)',
                 (conversation_id, run_id, event_type, payload_json),
             )
+            return int(cursor.lastrowid)
 
-    def list_run_events(self, conversation_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    def list_run_events(self, conversation_id: str, limit: int = 100, after_id: int | None = None) -> list[dict[str, Any]]:
         with self._connect() as conn:
-            rows = conn.execute(
-                'SELECT id, conversation_id, run_id, event_type, payload_json, created_at FROM run_events WHERE conversation_id = ? ORDER BY id DESC LIMIT ?',
-                (conversation_id, limit),
-            ).fetchall()
+            if after_id is None:
+                rows = conn.execute(
+                    'SELECT id, conversation_id, run_id, event_type, payload_json, created_at FROM run_events WHERE conversation_id = ? ORDER BY id DESC LIMIT ?',
+                    (conversation_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    'SELECT id, conversation_id, run_id, event_type, payload_json, created_at FROM run_events WHERE conversation_id = ? AND id > ? ORDER BY id ASC LIMIT ?',
+                    (conversation_id, after_id, limit),
+                ).fetchall()
             items = []
-            for row in reversed(rows):
+            ordered_rows = reversed(rows) if after_id is None else rows
+            for row in ordered_rows:
                 item = dict(row)
                 item['payload'] = json.loads(item.pop('payload_json') or '{}')
                 items.append(item)
             return items
+
+    def recover_incomplete_state(self) -> dict[str, int]:
+        summary = {'runs': 0, 'jobs': 0, 'approvals': 0, 'messages': 0}
+        with self._connect() as conn:
+            stale_runs = conn.execute(
+                "SELECT id, assistant_message_id FROM runs WHERE status IN ('queued', 'running', 'waiting_approval')"
+            ).fetchall()
+            for row in stale_runs:
+                summary['runs'] += 1
+                conn.execute(
+                    "UPDATE runs SET status = 'error', error_text = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (RESTART_INTERRUPTED_ERROR, row['id']),
+                )
+                assistant_message_id = row['assistant_message_id']
+                if assistant_message_id:
+                    message_row = conn.execute(
+                        'SELECT content, status FROM messages WHERE id = ?',
+                        (assistant_message_id,),
+                    ).fetchone()
+                    if message_row and message_row['status'] in {'queued', 'streaming'}:
+                        existing = message_row['content'] or ''
+                        content = f'{existing}\n\n{RESTART_INTERRUPTED_NOTE}'.strip() if existing else RESTART_INTERRUPTED_NOTE
+                        conn.execute(
+                            'UPDATE messages SET content = ?, status = ? WHERE id = ?',
+                            (content, 'error', assistant_message_id),
+                        )
+                        summary['messages'] += 1
+
+            stale_jobs = conn.execute(
+                "SELECT id FROM jobs WHERE status = 'running'"
+            ).fetchall()
+            for row in stale_jobs:
+                summary['jobs'] += 1
+                conn.execute(
+                    "UPDATE jobs SET status = 'error', error_text = ?, lease_until = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (RESTART_INTERRUPTED_ERROR, row['id']),
+                )
+
+            summary['approvals'] = conn.execute(
+                "SELECT COUNT(*) FROM approvals WHERE status = 'pending'"
+            ).fetchone()[0]
+        return summary
 
 store = None

@@ -47,7 +47,7 @@
       border-top: 1px solid #374151;
       padding: 16px;
       display: grid;
-      grid-template-columns: minmax(0, 1fr) auto auto;
+      grid-template-columns: minmax(0, 1fr) minmax(140px, 180px) auto auto;
       gap: 8px;
       align-items: end;
     }
@@ -67,8 +67,8 @@
       color: #d1d5db;
       max-width: min(760px, 100%);
     }
-    button, input, textarea { font: inherit; }
-    input, textarea {
+    button, input, textarea, select { font: inherit; }
+    input, textarea, select {
       background: #0f172a;
       color: #e5e7eb;
       border: 1px solid #374151;
@@ -195,7 +195,7 @@
         padding: 12px;
       }
       .composer {
-        grid-template-columns: 1fr 1fr;
+        grid-template-columns: 1fr 1fr 1fr;
       }
       .composer textarea {
         grid-column: 1 / -1;
@@ -243,7 +243,7 @@
         max-height: none;
       }
       .composer {
-        grid-template-columns: minmax(0, 1fr) auto auto;
+        grid-template-columns: minmax(0, 1fr) minmax(140px, 180px) auto auto;
       }
       .composer textarea {
         grid-column: auto;
@@ -291,6 +291,10 @@
       <div class="composer">
         <textarea id="input" placeholder="Send a message to Hermes...
 Ctrl/Cmd+Enter to send. Shift+Ctrl/Cmd+Enter to queue as a background job."></textarea>
+        <select id="backgroundExecutor" aria-label="Background executor">
+          <option value="hermes">Hermes job</option>
+          <option value="codex">Codex job</option>
+        </select>
         <button id="background" class="secondary">Queue job</button>
         <button id="send">Send</button>
       </div>
@@ -299,6 +303,8 @@ Ctrl/Cmd+Enter to send. Shift+Ctrl/Cmd+Enter to queue as a background job."></te
 <script>
 let currentChat = null;
 let eventSource = null;
+let lastEventId = null;
+let reconnectTimer = null;
 const messagesEl = document.getElementById('messages');
 const chatListEl = document.getElementById('chatList');
 const jobsEl = document.getElementById('jobs');
@@ -309,6 +315,7 @@ const attachPanelEl = document.getElementById('attachPanel');
 const attachListEl = document.getElementById('attachList');
 const attachStatusEl = document.getElementById('attachStatus');
 const attachTitleOverrideEl = document.getElementById('attachTitleOverride');
+const backgroundExecutorEl = document.getElementById('backgroundExecutor');
 let attachableSessions = [];
 let selectedAttachSessionId = null;
 const basePath = (() => {
@@ -457,7 +464,11 @@ async function loadJobs() {
   if (!currentChat) return;
   const res = await fetch(apiUrl(`/api/conversations/${currentChat}/jobs`));
   const jobs = await res.json();
-  jobsEl.innerHTML = jobs.map(job => `<div class="job"><div>${job.prompt}</div><div class="meta">${job.status} · run_after ${job.run_after}</div></div>`).join('') || '<div class="meta">No jobs yet</div>';
+  jobsEl.innerHTML = jobs.map(job => {
+    const thread = job.metadata && job.metadata.thread_id ? ` · thread ${job.metadata.thread_id}` : '';
+    const artifactDir = job.artifact_dir ? `<div class="meta">artifacts ${job.artifact_dir}</div>` : '';
+    return `<div class="job"><div>${job.prompt}</div><div class="meta">${job.executor || 'hermes'} · ${job.status} · run_after ${job.run_after}${thread}</div>${artifactDir}</div>`;
+  }).join('') || '<div class="meta">No jobs yet</div>';
 }
 
 async function loadApprovals() {
@@ -493,48 +504,148 @@ async function resolveApproval(id, resolution) {
   await loadApprovals();
 }
 
+function clearReconnectTimer() {
+  if (reconnectTimer) {
+    window.clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+}
+
+async function refreshCurrentChatState() {
+  if (!currentChat) return;
+  const [messagesRes, jobsRes, approvalsRes] = await Promise.all([
+    fetch(apiUrl(`/api/conversations/${currentChat}/messages`)),
+    fetch(apiUrl(`/api/conversations/${currentChat}/jobs`)),
+    fetch(apiUrl(`/api/conversations/${currentChat}/approvals`)),
+  ]);
+  const [messages, jobs, approvals] = await Promise.all([
+    messagesRes.json(),
+    jobsRes.json(),
+    approvalsRes.json(),
+  ]);
+  renderMessages(messages);
+  jobsEl.innerHTML = jobs.map(job => {
+    const thread = job.metadata && job.metadata.thread_id ? ` · thread ${job.metadata.thread_id}` : '';
+    const artifactDir = job.artifact_dir ? `<div class="meta">artifacts ${job.artifact_dir}</div>` : '';
+    return `<div class="job"><div>${job.prompt}</div><div class="meta">${job.executor || 'hermes'} · ${job.status} · run_after ${job.run_after}${thread}</div>${artifactDir}</div>`;
+  }).join('') || '<div class="meta">No jobs yet</div>';
+  approvalsEl.innerHTML = '';
+  if (!approvals.length) {
+    approvalsEl.innerHTML = '<div class="meta">No approvals observed yet</div>';
+  } else {
+    for (const approval of approvals) {
+      const div = document.createElement('div');
+      div.className = 'approval';
+      div.innerHTML = `<div>${approval.summary}</div><div class="meta">${approval.status}</div>`;
+      if (approval.status === 'pending') {
+        const approve = document.createElement('button');
+        approve.textContent = 'Approve';
+        approve.onclick = () => resolveApproval(approval.id, 'approved');
+        const deny = document.createElement('button');
+        deny.textContent = 'Deny';
+        deny.className = 'secondary';
+        deny.onclick = () => resolveApproval(approval.id, 'denied');
+        div.appendChild(approve);
+        div.appendChild(deny);
+      }
+      approvalsEl.appendChild(div);
+    }
+  }
+}
+
+async function applyEvent(event) {
+  if (event._event_id) lastEventId = event._event_id;
+  if (event.event === 'message.created') upsertMessage(event.message);
+  if (event.event === 'message.delta') {
+    const el = document.getElementById('msg-' + event.message_id);
+    if (el) el.textContent = (el.textContent || '') + (event.delta || '');
+    setStatus('streaming');
+  }
+  if (event.event === 'message.completed') {
+    const el = document.getElementById('msg-' + event.message_id);
+    if (el) el.textContent = event.content || '';
+    setStatus('idle');
+    await loadJobs();
+  }
+  if (event.event === 'message.error') {
+    const el = document.getElementById('msg-' + event.message_id);
+    if (el) el.textContent = '[error] ' + event.error;
+    setStatus('error');
+    await loadJobs();
+  }
+  if (event.event === 'job.queued' || event.event === 'job.started' || event.event === 'job.codex.started') {
+    await loadJobs();
+    appendToolEvent(`${event.event}: ${(event.job && event.job.prompt) || ''}`);
+  }
+  if (event.event === 'approval.created' || event.event === 'approval.resolved' || event.event === 'approval.waiting') {
+    await loadApprovals();
+    appendToolEvent(event.event);
+  }
+  if (event.event === 'run.retrying') {
+    setStatus(`retrying in ${event.backoff_seconds}s`);
+    appendToolEvent(`retrying after transient provider error: ${event.error}`);
+  }
+  if (event.event === 'tool.started') appendToolEvent(`tool started: ${event.tool}${event.preview ? ' — ' + event.preview : ''}`);
+  if (event.event === 'tool.completed') appendToolEvent(`tool completed: ${event.tool}${event.error ? ' (error)' : ''}`);
+  if (event.event === 'reasoning.available') appendToolEvent(`reasoning available`);
+}
+
+async function replayMissedEvents() {
+  if (!currentChat || !lastEventId) return;
+  const res = await fetch(apiUrl(`/api/conversations/${currentChat}/events/history?after_id=${lastEventId}&limit=200`));
+  const history = await res.json();
+  for (const item of history) {
+    await applyEvent({...item.payload, _event_id: item.id});
+  }
+}
+
+function scheduleReconnect(delayMs = 1500) {
+  if (!currentChat) return;
+  clearReconnectTimer();
+  reconnectTimer = window.setTimeout(async () => {
+    reconnectTimer = null;
+    try {
+      await refreshCurrentChatState();
+      openEventStream(currentChat);
+      setStatus('idle');
+    } catch (error) {
+      setStatus('reconnect failed');
+      scheduleReconnect(Math.min(delayMs * 2, 10000));
+    }
+  }, delayMs);
+}
+
+function openEventStream(id) {
+  if (eventSource) eventSource.close();
+  const streamUrl = lastEventId
+    ? apiUrl(`/api/conversations/${id}/events?after_id=${lastEventId}`)
+    : apiUrl(`/api/conversations/${id}/events`);
+  eventSource = new EventSource(streamUrl);
+  eventSource.onmessage = async (ev) => {
+    if (ev.lastEventId) {
+      const parsed = Number.parseInt(ev.lastEventId, 10);
+      if (Number.isFinite(parsed)) lastEventId = parsed;
+    }
+    const event = JSON.parse(ev.data);
+    await applyEvent(event);
+  };
+  eventSource.onerror = () => {
+    setStatus(navigator.onLine ? 'reconnecting' : 'offline');
+    if (eventSource) {
+      eventSource.close();
+      eventSource = null;
+    }
+    scheduleReconnect();
+  };
+}
+
 async function openChat(id) {
   currentChat = id;
+  lastEventId = null;
+  clearReconnectTimer();
   await loadChats();
-  const res = await fetch(apiUrl(`/api/conversations/${id}/messages`));
-  const messages = await res.json();
-  renderMessages(messages);
-  await loadJobs();
-  await loadApprovals();
-  if (eventSource) eventSource.close();
-  eventSource = new EventSource(apiUrl(`/api/conversations/${id}/events`));
-  eventSource.onmessage = async (ev) => {
-    const event = JSON.parse(ev.data);
-    if (event.event === 'message.created') upsertMessage(event.message);
-    if (event.event === 'message.delta') {
-      const el = document.getElementById('msg-' + event.message_id);
-      if (el) el.textContent = (el.textContent || '') + (event.delta || '');
-      setStatus('streaming');
-    }
-    if (event.event === 'message.completed') {
-      const el = document.getElementById('msg-' + event.message_id);
-      if (el) el.textContent = event.content || '';
-      setStatus('idle');
-      await loadJobs();
-    }
-    if (event.event === 'message.error') {
-      const el = document.getElementById('msg-' + event.message_id);
-      if (el) el.textContent = '[error] ' + event.error;
-      setStatus('error');
-      await loadJobs();
-    }
-    if (event.event === 'job.queued' || event.event === 'job.started') {
-      await loadJobs();
-      appendToolEvent(`${event.event}: ${(event.job && event.job.prompt) || ''}`);
-    }
-    if (event.event === 'approval.created' || event.event === 'approval.resolved') {
-      await loadApprovals();
-      appendToolEvent(event.event);
-    }
-    if (event.event === 'tool.started') appendToolEvent(`tool started: ${event.tool}${event.preview ? ' — ' + event.preview : ''}`);
-    if (event.event === 'tool.completed') appendToolEvent(`tool completed: ${event.tool}${event.error ? ' (error)' : ''}`);
-    if (event.event === 'reasoning.available') appendToolEvent(`reasoning available`);
-  };
+  await refreshCurrentChatState();
+  openEventStream(id);
 }
 
 async function newChat() {
@@ -552,7 +663,7 @@ async function sendMessage(background = false) {
   input.value = '';
   setStatus(background ? 'job queued' : 'running');
   if (background) {
-    await fetch(apiUrl(`/api/conversations/${currentChat}/jobs`), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({prompt: content, delay_seconds: 0})});
+    await fetch(apiUrl(`/api/conversations/${currentChat}/jobs`), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({prompt: content, delay_seconds: 0, executor: backgroundExecutorEl.value})});
     await loadJobs();
     return;
   }
@@ -571,6 +682,15 @@ document.getElementById('input').addEventListener('keydown', (e) => {
     sendMessage(!!e.shiftKey);
   }
 });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') scheduleReconnect(0);
+});
+window.addEventListener('online', () => {
+  setStatus('reconnecting');
+  scheduleReconnect(0);
+});
+window.addEventListener('offline', () => setStatus('offline'));
+window.addEventListener('pageshow', () => scheduleReconnect(0));
 loadChats().then(async () => {
   const res = await fetch(apiUrl('/api/conversations'));
   const chats = await res.json();

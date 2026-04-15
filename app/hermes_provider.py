@@ -16,7 +16,10 @@ from gateway.run import _load_gateway_config, _resolve_gateway_model, _resolve_r
 from hermes_state import SessionDB
 from run_agent import AIAgent
 from tools.approval import (
+    approve_permanent,
+    approve_session,
     has_blocking_approval,
+    load_permanent_allowlist,
     register_gateway_notify,
     reset_current_session_key,
     resolve_gateway_approval,
@@ -32,11 +35,63 @@ class HermesProviderError(RuntimeError):
     pass
 
 
+def _is_transient_error(error_text: str | None) -> bool:
+    if not error_text:
+        return False
+    lowered = error_text.lower()
+    needles = (
+        'rate limit',
+        'rate_limit',
+        'too many requests',
+        'timeout',
+        'timed out',
+        'temporarily unavailable',
+        'temporary failure',
+        'connection reset',
+        'connection aborted',
+        'connection refused',
+        'connection error',
+        'quota',
+        'overloaded',
+        'try again',
+        '503',
+        '429',
+    )
+    return any(needle in lowered for needle in needles)
+
+
 class LocalHermesProvider:
     def __init__(self) -> None:
         self._session_db = SessionDB()
         self._pending_by_approval_id: dict[str, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
+        self._session_locks: dict[str, asyncio.Lock] = {}
+
+    async def rehydrate_pending_approvals(self, approvals: list[dict[str, Any]]) -> None:
+        rebuilt: dict[str, dict[str, Any]] = {}
+        for item in approvals:
+            details = item.get('details') or {}
+            provider_approval_id = details.get('approval_id') or item.get('id')
+            rebuilt[provider_approval_id] = {
+                'approval_id': provider_approval_id,
+                'session_id': details.get('session_id'),
+                'command': details.get('command', ''),
+                'description': details.get('description', item.get('summary', 'dangerous command')),
+                'pattern_keys': details.get('pattern_keys') or ([details['pattern_key']] if details.get('pattern_key') else []),
+                'restored': True,
+                'tailchat_approval_id': item.get('id'),
+                'run_id': item.get('run_id'),
+            }
+        async with self._lock:
+            self._pending_by_approval_id = rebuilt
+
+    async def _session_lock_for(self, session_id: str) -> asyncio.Lock:
+        async with self._lock:
+            lock = self._session_locks.get(session_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._session_locks[session_id] = lock
+            return lock
 
     def _create_agent(self, session_id: str, stream_delta_callback=None, tool_progress_callback=None) -> AIAgent:
         runtime_kwargs = _resolve_runtime_agent_kwargs()
@@ -67,42 +122,75 @@ class LocalHermesProvider:
         user_message: str,
         on_event: EventHandler,
     ) -> None:
-        loop = asyncio.get_running_loop()
+        session_lock = await self._session_lock_for(session_id)
+        async with session_lock:
+            loop = asyncio.get_running_loop()
+            emitted_events = False
+            max_attempts = max(1, int(__import__('os').getenv('TAILCHAT_TRANSIENT_RETRY_ATTEMPTS', '3')))
 
-        def text_cb(delta: str | None) -> None:
-            if delta is None:
-                return
-            asyncio.run_coroutine_threadsafe(on_event({'event': 'message.delta', 'delta': delta}), loop)
+            def text_cb(delta: str | None) -> None:
+                nonlocal emitted_events
+                if delta is None:
+                    return
+                emitted_events = True
+                asyncio.run_coroutine_threadsafe(on_event({'event': 'message.delta', 'delta': delta}), loop)
 
-        def tool_cb(event_type: str, tool_name: str = None, preview: str = None, args=None, **kwargs):
-            event = {'event': event_type, 'tool': tool_name, 'preview': preview, 'args': args or {}}
-            event.update(kwargs)
-            asyncio.run_coroutine_threadsafe(on_event(event), loop)
+            def tool_cb(event_type: str, tool_name: str = None, preview: str = None, args=None, **kwargs):
+                nonlocal emitted_events
+                emitted_events = True
+                event = {'event': event_type, 'tool': tool_name, 'preview': preview, 'args': args or {}}
+                event.update(kwargs)
+                asyncio.run_coroutine_threadsafe(on_event(event), loop)
 
-        def approval_notify(approval_data: dict) -> None:
-            asyncio.run_coroutine_threadsafe(self._register_approval(session_id, approval_data, on_event), loop)
+            def approval_notify(approval_data: dict) -> None:
+                asyncio.run_coroutine_threadsafe(self._register_approval(session_id, approval_data, on_event), loop)
 
-        def run_sync() -> dict[str, Any]:
-            agent = self._create_agent(session_id, stream_delta_callback=text_cb, tool_progress_callback=tool_cb)
-            token = set_current_session_key(session_id)
-            register_gateway_notify(session_id, approval_notify)
-            try:
-                return agent.run_conversation(user_message, conversation_history=conversation_history, task_id=session_id)
-            finally:
-                unregister_gateway_notify(session_id)
-                reset_current_session_key(token)
+            def run_sync() -> dict[str, Any]:
+                agent = self._create_agent(session_id, stream_delta_callback=text_cb, tool_progress_callback=tool_cb)
+                token = set_current_session_key(session_id)
+                register_gateway_notify(session_id, approval_notify)
+                try:
+                    return agent.run_conversation(user_message, conversation_history=conversation_history, task_id=session_id)
+                finally:
+                    unregister_gateway_notify(session_id)
+                    reset_current_session_key(token)
 
-        result = await loop.run_in_executor(None, run_sync)
-        final_response = result.get('final_response', '') if isinstance(result, dict) else ''
-        error_text = result.get('error') if isinstance(result, dict) else None
-        if has_blocking_approval(session_id):
-            await on_event({'event': 'approval.waiting', 'session_id': session_id})
-        if final_response:
-            await on_event({'event': 'run.completed', 'output': final_response})
-        elif error_text:
-            await on_event({'event': 'run.failed', 'error': error_text})
-        else:
-            await on_event({'event': 'run.failed', 'error': 'No response generated'})
+            result: dict[str, Any] | None = None
+            error_text: str | None = None
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    result = await loop.run_in_executor(None, run_sync)
+                    error_text = result.get('error') if isinstance(result, dict) else None
+                except Exception as exc:
+                    error_text = str(exc)
+                    result = None
+
+                if error_text and attempt < max_attempts and _is_transient_error(error_text) and not emitted_events and not has_blocking_approval(session_id):
+                    backoff_seconds = min(12, 2 ** (attempt - 1))
+                    await on_event({
+                        'event': 'run.retrying',
+                        'session_id': session_id,
+                        'attempt': attempt,
+                        'next_attempt': attempt + 1,
+                        'backoff_seconds': backoff_seconds,
+                        'error': error_text,
+                    })
+                    await asyncio.sleep(backoff_seconds)
+                    continue
+                if error_text and result is None:
+                    raise HermesProviderError(error_text)
+                break
+
+            result = result or {}
+            final_response = result.get('final_response', '') if isinstance(result, dict) else ''
+            if has_blocking_approval(session_id):
+                await on_event({'event': 'approval.waiting', 'session_id': session_id})
+            if final_response:
+                await on_event({'event': 'run.completed', 'output': final_response})
+            elif error_text:
+                await on_event({'event': 'run.failed', 'error': error_text})
+            else:
+                await on_event({'event': 'run.failed', 'error': 'No response generated'})
 
     async def get_session(self, session_id: str) -> dict[str, Any] | None:
         loop = asyncio.get_running_loop()
@@ -162,6 +250,7 @@ class LocalHermesProvider:
         async with self._lock:
             self._pending_by_approval_id[approval_id] = record
         await on_event({'event': 'approval.requested', 'approval': record})
+        await on_event({'event': 'approval.waiting', 'session_id': session_id, 'approval_id': approval_id})
 
     async def resolve_approval(self, approval_id: str, decision: str) -> dict[str, Any]:
         async with self._lock:
@@ -177,12 +266,42 @@ class LocalHermesProvider:
             'deny': 'deny',
         }
         choice = choice_map.get(decision, decision)
-        count = resolve_gateway_approval(approval['session_id'], choice, resolve_all=False)
+        session_id = approval.get('session_id')
+        count = resolve_gateway_approval(session_id, choice, resolve_all=False) if session_id else 0
+        restored = bool(approval.get('restored'))
+        scope_adjusted = False
+
         if not count:
-            raise HermesProviderError('No pending command to resolve')
-        return {
+            if not restored:
+                raise HermesProviderError('No pending command to resolve')
+            pattern_keys = list(approval.get('pattern_keys') or [])
+            if choice in {'once', 'session'}:
+                for key in pattern_keys:
+                    approve_session(session_id, key)
+                scope_adjusted = choice == 'once'
+            elif choice == 'always':
+                persisted = set(load_permanent_allowlist())
+                for key in pattern_keys:
+                    approve_session(session_id, key)
+                    approve_permanent(key)
+                    persisted.add(key)
+                if persisted:
+                    load_permanent_allowlist()
+                    from tools.approval import save_permanent_allowlist
+                    save_permanent_allowlist(persisted)
+            elif choice != 'deny':
+                raise HermesProviderError(f'Unsupported approval decision: {choice}')
+
+        result = {
             'approval_id': approval_id,
-            'session_id': approval['session_id'],
+            'session_id': session_id,
             'decision': choice,
             'resolved_count': count,
         }
+        if restored:
+            result['restored'] = True
+            result['resume_required'] = True
+        if scope_adjusted:
+            result['scope_adjusted'] = True
+            result['scope_adjustment_reason'] = 'Recovered approvals use session scope when replaying an interrupted run.'
+        return result
