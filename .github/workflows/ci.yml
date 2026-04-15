@@ -37,5 +37,5 @@ jobs:
       - name: Compile Python sources
         run: python -m py_compile app/*.py tests/*.py
 
-      - name: Run smoke tests
-        run: pytest -q tests/test_smoke.py
+      - name: Run smoke and UI regression tests
+        run: pytest -q tests/test_smoke.py tests/test_traceability_and_mobile_layout.py
