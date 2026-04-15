@@ -4,7 +4,7 @@ import asyncio
 import json
 import socket
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -14,9 +14,10 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from .broker import broker
+from .codex_runner import CodexRunnerError, run_codex_task
 from .config import APP_TITLE, DB_PATH
 from .hermes_provider import HermesProviderError, LocalHermesProvider
-from .store import Store
+from .store import RESTART_INTERRUPTED_ERROR, Store
 import app.store as store_module
 
 
@@ -40,6 +41,12 @@ class MessageCreate(BaseModel):
 class JobCreate(BaseModel):
     prompt: str = Field(min_length=1)
     delay_seconds: int = 0
+    executor: str = Field(default='hermes', pattern='^(hermes|codex)$')
+    thread_id: str | None = None
+    bead_id: str | None = None
+    reserve_paths: list[str] = Field(default_factory=list)
+    notify_to: list[str] = Field(default_factory=list)
+    reservation_reason: str | None = None
 
 
 class ApprovalResolve(BaseModel):
@@ -68,15 +75,25 @@ store_module.store = store
 hermes = LocalHermesProvider()
 worker_id = f"tailchat-{socket.gethostname()}-{Path(DB_PATH).name}"
 poll_task: asyncio.Task | None = None
+startup_recovery_summary: dict[str, int] = {'runs': 0, 'jobs': 0, 'approvals': 0, 'messages': 0}
+active_run_tasks: dict[str, asyncio.Task] = {}
+active_job_tasks: dict[str, asyncio.Task] = {}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global poll_task
+    global poll_task, startup_recovery_summary
+    startup_recovery_summary = store.recover_incomplete_state()
+    await hermes.rehydrate_pending_approvals(store.list_pending_approvals())
     poll_task = asyncio.create_task(job_poller())
     try:
         yield
     finally:
+        for task in list(active_run_tasks.values()) + list(active_job_tasks.values()):
+            task.cancel()
+        for task in list(active_run_tasks.values()) + list(active_job_tasks.values()):
+            with suppress(asyncio.CancelledError):
+                await task
         if poll_task:
             poll_task.cancel()
             try:
@@ -92,10 +109,22 @@ app.mount('/static', StaticFiles(directory=static_dir), name='static')
 
 
 async def publish(conversation_id: str, event: dict, run_id: str | None = None):
-    store.append_run_event(conversation_id, run_id, event.get('event', 'unknown'), json.dumps(event))
-    await broker.publish(conversation_id, event)
+    payload = dict(event)
+    event_id = store.append_run_event(conversation_id, run_id, payload.get('event', 'unknown'), json.dumps(payload))
+    payload['_event_id'] = event_id
+    await broker.publish(conversation_id, payload)
 
 
+def _track_background_task(task_map: dict[str, asyncio.Task], key: str, task: asyncio.Task) -> asyncio.Task:
+    task_map[key] = task
+
+    def _cleanup(done_task: asyncio.Task) -> None:
+        task_map.pop(key, None)
+        with suppress(asyncio.CancelledError, Exception):
+            done_task.result()
+
+    task.add_done_callback(_cleanup)
+    return task
 
 
 def _parse_import_cursor(value: str | None) -> float | None:
@@ -157,7 +186,10 @@ async def run_turn(conversation_id: str, assistant_message_id: str, user_message
         for m in messages
         if m['id'] != assistant_message_id and m['status'] != 'queued' and m['role'] in {'user', 'assistant', 'system'}
     ]
-    conversation_history = history[:-1] if history else []
+    if history and history[-1]['role'] == 'user' and history[-1]['content'] == user_message:
+        conversation_history = history[:-1]
+    else:
+        conversation_history = history
     buffer = ''
     store.update_run(run_id, status='running')
     if job_id:
@@ -173,6 +205,7 @@ async def run_turn(conversation_id: str, assistant_message_id: str, user_message
             return
         if kind == 'approval.requested':
             data = event.get('approval', {})
+            store.update_run(run_id, status='waiting_approval')
             approval = store.create_approval(
                 conversation_id,
                 summary=data.get('description', 'Dangerous command requires approval'),
@@ -230,33 +263,96 @@ async def run_turn(conversation_id: str, assistant_message_id: str, user_message
         await publish(conversation_id, {'event': 'message.error', 'message_id': assistant_message_id, 'error': err, 'run_id': run_id, 'job_id': job_id}, run_id=run_id)
 
 
+async def retry_interrupted_run(run: dict, *, approval_id: str | None = None) -> dict[str, str] | None:
+    if not run:
+        return None
+    if run.get('status') != 'error' or run.get('error_text') != RESTART_INTERRUPTED_ERROR:
+        return None
+    conversation_id = run['conversation_id']
+    if store.get_active_run(conversation_id):
+        return None
+    assistant_msg = store.add_message(
+        conversation_id,
+        'assistant',
+        '',
+        status='queued',
+        metadata={'resumed_from_run_id': run['id'], 'approval_id': approval_id} if approval_id else {'resumed_from_run_id': run['id']},
+    )
+    replay_run = store.create_run(
+        conversation_id,
+        run['trigger_type'],
+        trigger_text=run.get('trigger_text', ''),
+        assistant_message_id=assistant_msg['id'],
+        job_id=run.get('job_id'),
+    )
+    await publish(conversation_id, {'event': 'message.created', 'message': assistant_msg}, run_id=replay_run['id'])
+    task = asyncio.create_task(
+        run_turn(
+            conversation_id,
+            assistant_msg['id'],
+            run.get('trigger_text', ''),
+            replay_run['id'],
+            job_id=run.get('job_id'),
+        )
+    )
+    _track_background_task(active_run_tasks, replay_run['id'], task)
+    return {'assistant_message_id': assistant_msg['id'], 'run_id': replay_run['id']}
+
+
 async def run_job(job: dict) -> None:
     conversation_id = job['conversation_id']
+    executor = job.get('executor', 'hermes')
     system_note = store.add_message(
         conversation_id,
         'system',
-        f"[Background job started] {job['prompt']}",
-        metadata={'job_id': job['id'], 'kind': 'background-job-status'},
+        f"[Background {executor} job started] {job['prompt']}",
+        metadata={'job_id': job['id'], 'kind': 'background-job-status', 'executor': executor},
     )
     assistant_msg = store.add_message(
         conversation_id,
         'assistant',
         '',
         status='queued',
-        metadata={'job_id': job['id'], 'kind': 'background-job-result'},
+        metadata={'job_id': job['id'], 'kind': 'background-job-result', 'executor': executor},
     )
-    run = store.create_run(conversation_id, 'job', trigger_text=job['prompt'], assistant_message_id=assistant_msg['id'], job_id=job['id'])
+    run = store.create_run(conversation_id, f'{executor}_job', trigger_text=job['prompt'], assistant_message_id=assistant_msg['id'], job_id=job['id'])
     await publish(conversation_id, {'event': 'message.created', 'message': system_note})
     await publish(conversation_id, {'event': 'message.created', 'message': assistant_msg})
-    await publish(conversation_id, {'event': 'job.started', 'job': store.list_jobs(conversation_id)[0], 'run_id': run['id']}, run_id=run['id'])
+    await publish(conversation_id, {'event': 'job.started', 'job': store.get_job(job['id']), 'run_id': run['id']}, run_id=run['id'])
+    if executor == 'codex':
+        await run_codex_turn(conversation_id, assistant_msg['id'], job, run['id'])
+        return
     await run_turn(conversation_id, assistant_msg['id'], job['prompt'], run['id'], job_id=job['id'])
+
+
+async def run_codex_turn(conversation_id: str, assistant_message_id: str, job: dict, run_id: str) -> None:
+    metadata = job.get('metadata', {})
+    store.update_run(run_id, status='running')
+    try:
+        result = await run_codex_task(job_id=job['id'], prompt=job['prompt'], metadata=metadata)
+        store.update_job(job['id'], status='running', result_message_id=assistant_message_id, artifact_dir=result['artifact_dir'])
+        await publish(conversation_id, {'event': 'job.codex.started', 'job': store.get_job(job['id']), 'run_id': run_id}, run_id=run_id)
+        final = result['final_output'] or 'Codex completed without a final message.'
+        store.update_message(assistant_message_id, final, status='complete')
+        merged_metadata = dict(metadata)
+        merged_metadata['artifact_dir'] = result['artifact_dir']
+        store.update_run(run_id, status='complete')
+        store.update_job(job['id'], status='complete', result_message_id=assistant_message_id, artifact_dir=result['artifact_dir'], metadata=merged_metadata)
+        await publish(conversation_id, {'event': 'message.completed', 'message_id': assistant_message_id, 'content': final, 'run_id': run_id, 'job_id': job['id']}, run_id=run_id)
+    except CodexRunnerError as exc:
+        err = str(exc)
+        store.update_message(assistant_message_id, f'[Codex job failed] {err}', status='error')
+        store.update_run(run_id, status='error', error_text=err)
+        store.update_job(job['id'], status='error', error_text=err, result_message_id=assistant_message_id)
+        await publish(conversation_id, {'event': 'message.error', 'message_id': assistant_message_id, 'error': err, 'run_id': run_id, 'job_id': job['id']}, run_id=run_id)
 
 
 async def job_poller() -> None:
     while True:
         jobs = store.claim_due_jobs(worker_id, limit=3)
         for job in jobs:
-            asyncio.create_task(run_job(job))
+            task = asyncio.create_task(run_job(job))
+            _track_background_task(active_job_tasks, job['id'], task)
         await asyncio.sleep(2)
 
 
@@ -273,6 +369,7 @@ async def health():
         'worker_id': worker_id,
         'provider': 'local-hermes',
         'session_linkage_mode': 'session-aware-abstraction-layer',
+        'startup_recovery_summary': startup_recovery_summary,
     }
 
 
@@ -355,22 +452,33 @@ async def get_approvals(conversation_id: str):
 
 
 @app.get('/api/conversations/{conversation_id}/events/history')
-async def event_history(conversation_id: str, limit: int = 100):
+async def event_history(conversation_id: str, limit: int = 100, after_id: int | None = None):
     if not store.conversation_exists(conversation_id):
         raise HTTPException(status_code=404, detail='conversation not found')
-    return store.list_run_events(conversation_id, limit=limit)
+    return store.list_run_events(conversation_id, limit=limit, after_id=after_id)
 
 
 @app.post('/api/conversations/{conversation_id}/messages')
 async def post_message(conversation_id: str, body: MessageCreate):
     if not store.conversation_exists(conversation_id):
         raise HTTPException(status_code=404, detail='conversation not found')
+    active_run = store.get_active_run(conversation_id, trigger_type='user_message')
+    if active_run:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                'message': 'Another message is already running for this conversation. Wait for it to finish or resolve its approval first.',
+                'run_id': active_run['id'],
+                'status': active_run['status'],
+            },
+        )
     user_msg = store.add_message(conversation_id, 'user', body.content, status='complete')
     assistant_msg = store.add_message(conversation_id, 'assistant', '', status='queued')
     run = store.create_run(conversation_id, 'user_message', trigger_text=body.content, assistant_message_id=assistant_msg['id'])
     await publish(conversation_id, {'event': 'message.created', 'message': user_msg}, run_id=run['id'])
     await publish(conversation_id, {'event': 'message.created', 'message': assistant_msg}, run_id=run['id'])
-    asyncio.create_task(run_turn(conversation_id, assistant_msg['id'], body.content, run['id']))
+    task = asyncio.create_task(run_turn(conversation_id, assistant_msg['id'], body.content, run['id']))
+    _track_background_task(active_run_tasks, run['id'], task)
     return {'ok': True, 'user_message_id': user_msg['id'], 'assistant_message_id': assistant_msg['id'], 'run_id': run['id']}
 
 
@@ -378,12 +486,20 @@ async def post_message(conversation_id: str, body: MessageCreate):
 async def create_job(conversation_id: str, body: JobCreate):
     if not store.conversation_exists(conversation_id):
         raise HTTPException(status_code=404, detail='conversation not found')
-    job = store.create_job(conversation_id, body.prompt, delay_seconds=body.delay_seconds)
+    metadata = {
+        'thread_id': body.thread_id,
+        'bead_id': body.bead_id,
+        'reserve_paths': body.reserve_paths,
+        'notify_to': body.notify_to,
+        'reservation_reason': body.reservation_reason,
+        'task': body.prompt,
+    }
+    job = store.create_job(conversation_id, body.prompt, delay_seconds=body.delay_seconds, executor=body.executor, metadata=metadata)
     note = store.add_message(
         conversation_id,
         'system',
-        f"[Background job queued] {body.prompt}",
-        metadata={'job_id': job['id'], 'kind': 'background-job-status'},
+        f"[Background {body.executor} job queued] {body.prompt}",
+        metadata={'job_id': job['id'], 'kind': 'background-job-status', 'executor': body.executor},
     )
     await publish(conversation_id, {'event': 'message.created', 'message': note})
     await publish(conversation_id, {'event': 'job.queued', 'job': job})
@@ -392,34 +508,56 @@ async def create_job(conversation_id: str, body: JobCreate):
 
 @app.post('/api/approvals/{approval_id}/resolve')
 async def resolve_approval(approval_id: str, body: ApprovalResolve):
-    approvals = []
-    # find approval by scanning known approvals in DB via current conversations
-    for conversation in store.list_conversations():
-        for item in store.list_approvals(conversation['id']):
-            if item['id'] == approval_id:
-                approvals.append(item)
-                break
-    if not approvals:
+    item = store.get_approval(approval_id)
+    if not item:
         raise HTTPException(status_code=404, detail='approval not found')
-    item = approvals[0]
+    if item.get('status') != 'pending':
+        raise HTTPException(status_code=409, detail=f"approval is not pending (status={item.get('status')})")
     details = item.get('details', {})
     provider_approval_id = details.get('approval_id', approval_id)
     provider_result = await hermes.resolve_approval(provider_approval_id, body.resolution)
     resolved = store.resolve_approval(approval_id, body.resolution)
     if not resolved:
         raise HTTPException(status_code=404, detail='approval not found after provider resolve')
-    await publish(resolved['conversation_id'], {'event': 'approval.resolved', 'approval': resolved, 'provider_result': provider_result, 'session_id': details.get('session_id')}, run_id=resolved.get('run_id'))
-    return resolved
+
+    replay = None
+    run = store.get_run(item['run_id']) if item.get('run_id') else {}
+    if provider_result.get('resume_required') and provider_result.get('decision') != 'deny':
+        replay = await retry_interrupted_run(run, approval_id=approval_id)
+
+    payload = {
+        'event': 'approval.resolved',
+        'approval': resolved,
+        'provider_result': provider_result,
+        'session_id': details.get('session_id'),
+    }
+    if replay:
+        payload['replay'] = replay
+    await publish(resolved['conversation_id'], payload, run_id=resolved.get('run_id'))
+    return {'approval': resolved, 'provider_result': provider_result, 'replay': replay}
 
 
 @app.get('/api/conversations/{conversation_id}/events')
-async def events(conversation_id: str):
+async def events(conversation_id: str, after_id: int | None = None, last_event_id: str | None = None):
     async def stream():
         queue = await broker.subscribe(conversation_id)
         try:
+            cursor = after_id
+            if cursor is None and last_event_id:
+                try:
+                    cursor = int(last_event_id)
+                except ValueError:
+                    cursor = None
+            if cursor is not None:
+                history = store.list_run_events(conversation_id, limit=500, after_id=cursor)
+                for item in history:
+                    payload = dict(item['payload'])
+                    payload['_event_id'] = item['id']
+                    yield {'id': str(item['id']), 'data': json.dumps(payload)}
             while True:
                 event = await queue.get()
-                yield {'data': json.dumps(event)}
+                event_id = event.get('_event_id')
+                yield {'id': str(event_id) if event_id is not None else None, 'data': json.dumps(event)}
         finally:
             await broker.unsubscribe(conversation_id, queue)
 
