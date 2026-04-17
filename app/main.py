@@ -209,19 +209,34 @@ def _format_provider_error(error_text: str, *, prefix: str) -> str:
     return f'[{prefix}] {error_text}'
 
 
-async def run_turn(conversation_id: str, assistant_message_id: str, user_message: str, run_id: str, job_id: str | None = None) -> None:
-    conversation = store.get_conversation(conversation_id)
-    hermes_session_id = (conversation or {}).get('hermes_session_id') or conversation_id
-    messages = store.get_messages(conversation_id)
+def _build_conversation_history(messages: list[dict], assistant_message_id: str, user_message: str, *, replay_original_user_message: bool = False) -> list[dict[str, str]]:
     history = [
         {'role': m['role'], 'content': m['content']}
         for m in messages
         if m['id'] != assistant_message_id and m['status'] != 'queued' and m['role'] in {'user', 'assistant', 'system'}
     ]
     if history and history[-1]['role'] == 'user' and history[-1]['content'] == user_message:
-        conversation_history = history[:-1]
-    else:
-        conversation_history = history
+        return history[:-1]
+    if replay_original_user_message:
+        for idx in range(len(history) - 1, -1, -1):
+            item = history[idx]
+            if item['role'] == 'user' and item['content'] == user_message:
+                return history[:idx]
+    return history
+
+
+async def run_turn(conversation_id: str, assistant_message_id: str, user_message: str, run_id: str, job_id: str | None = None) -> None:
+    conversation = store.get_conversation(conversation_id)
+    hermes_session_id = (conversation or {}).get('hermes_session_id') or conversation_id
+    messages = store.get_messages(conversation_id)
+    assistant_message = next((m for m in messages if m['id'] == assistant_message_id), None) or {}
+    replay_original_user_message = bool((assistant_message.get('metadata') or {}).get('resumed_from_run_id'))
+    conversation_history = _build_conversation_history(
+        messages,
+        assistant_message_id,
+        user_message,
+        replay_original_user_message=replay_original_user_message,
+    )
     buffer = ''
     store.update_run(run_id, status='running')
     if job_id:
@@ -594,23 +609,29 @@ async def resolve_approval(approval_id: str, body: ApprovalResolve):
 @app.get('/api/conversations/{conversation_id}/events')
 async def events(conversation_id: str, after_id: int | None = None, last_event_id: str | None = None):
     async def stream():
+        cursor = after_id
+        if cursor is None and last_event_id:
+            try:
+                cursor = int(last_event_id)
+            except ValueError:
+                cursor = None
         queue = await broker.subscribe(conversation_id)
+        last_replayed_id = cursor
         try:
-            cursor = after_id
-            if cursor is None and last_event_id:
-                try:
-                    cursor = int(last_event_id)
-                except ValueError:
-                    cursor = None
             if cursor is not None:
                 history = store.list_run_events(conversation_id, limit=500, after_id=cursor)
                 for item in history:
                     payload = dict(item['payload'])
                     payload['_event_id'] = item['id']
+                    last_replayed_id = item['id']
                     yield {'id': str(item['id']), 'data': json.dumps(payload)}
             while True:
                 event = await queue.get()
                 event_id = event.get('_event_id')
+                if last_replayed_id is not None and event_id is not None and event_id <= last_replayed_id:
+                    continue
+                if event_id is not None:
+                    last_replayed_id = event_id
                 yield {'id': str(event_id) if event_id is not None else None, 'data': json.dumps(event)}
         finally:
             await broker.unsubscribe(conversation_id, queue)

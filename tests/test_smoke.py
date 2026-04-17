@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import os
 import sys
 import types
@@ -20,8 +21,14 @@ class DummyLocalHermesProvider:
     session_messages: dict[str, list[dict]] = {}
     scripted_events: list[dict] | None = None
     pending_approvals: dict[str, dict] = {}
+    run_turn_calls: list[dict] = []
 
     async def run_turn(self, session_id, conversation_history, user_message, on_event):
+        self.run_turn_calls.append({
+            'session_id': session_id,
+            'conversation_history': [dict(item) for item in conversation_history],
+            'user_message': user_message,
+        })
         if self.scripted_events is not None:
             for event in self.scripted_events:
                 await on_event(dict(event))
@@ -97,6 +104,7 @@ def load_app(tmp_path: Path):
     DummyLocalHermesProvider.titles = {}
     DummyLocalHermesProvider.scripted_events = None
     DummyLocalHermesProvider.pending_approvals = {}
+    DummyLocalHermesProvider.run_turn_calls = []
     DummyLocalHermesProvider.session_messages = {
         'existing-alpha': [
             {'id': 1, 'role': 'user', 'content': 'hello from cli', 'timestamp': 10.0},
@@ -568,6 +576,72 @@ def test_event_history_supports_after_id_cursor(tmp_path: Path):
         later_events = later.json()
         assert all(item['id'] > cursor for item in later_events)
         assert any(item['payload']['event'] == 'message.completed' for item in later_events)
+
+
+def test_replay_run_turn_trims_original_user_prompt_from_history(tmp_path: Path):
+    app, _db_path = load_app(tmp_path)
+
+    import app.main as main_module
+
+    with TestClient(app) as client:
+        convo = client.post('/api/conversations', json={'title': 'Replay chat'}).json()
+        user_msg = main_module.store.add_message(convo['id'], 'user', 'repeat me', status='complete')
+        interrupted_msg = main_module.store.add_message(
+            convo['id'],
+            'assistant',
+            '[Tailchat interrupted this run during a restart. Please retry.]',
+            status='error',
+        )
+        interrupted_run = main_module.store.create_run(
+            convo['id'],
+            'user_message',
+            trigger_text='repeat me',
+            assistant_message_id=interrupted_msg['id'],
+        )
+        main_module.store.update_run(interrupted_run['id'], status='error', error_text=main_module.RESTART_INTERRUPTED_ERROR)
+
+        replay = asyncio.run(main_module.retry_interrupted_run(main_module.store.get_run(interrupted_run['id'])))
+        assert replay is not None
+        for _ in range(50):
+            messages = client.get(f"/api/conversations/{convo['id']}/messages").json()
+            if any(message['id'] == replay['assistant_message_id'] and message['status'] == 'complete' for message in messages):
+                break
+            time.sleep(0.01)
+
+        assert DummyLocalHermesProvider.run_turn_calls
+        last_call = DummyLocalHermesProvider.run_turn_calls[-1]
+        assert last_call['user_message'] == 'repeat me'
+        assert all(item['content'] != 'repeat me' for item in last_call['conversation_history'])
+        assert all('interrupted this run during a restart' not in item['content'] for item in last_call['conversation_history'])
+
+
+def test_event_stream_after_id_replays_history_without_duplicates(tmp_path: Path):
+    app, _db_path = load_app(tmp_path)
+
+    import app.main as main_module
+
+    async def collect_events():
+        convo = main_module.store.create_conversation('SSE replay chat')
+        event_one = {'event': 'message.created', 'message': {'id': 'm1'}}
+        event_two = {'event': 'message.completed', 'message_id': 'm1', 'content': 'done'}
+        first_id = main_module.store.append_run_event(convo['id'], None, event_one['event'], json.dumps(event_one))
+        second_id = main_module.store.append_run_event(convo['id'], None, event_two['event'], json.dumps(event_two))
+        duplicate_live = dict(event_two)
+        duplicate_live['_event_id'] = second_id
+        fresh_live = {'event': 'message.created', 'message': {'id': 'm2'}, '_event_id': second_id + 1}
+
+        stream = await main_module.events(convo['id'], after_id=first_id)
+        generator = stream.body_iterator
+        first_payload = json.loads((await generator.__anext__())['data'])
+        assert first_payload['_event_id'] == second_id
+
+        await main_module.broker.publish(convo['id'], duplicate_live)
+        await main_module.broker.publish(convo['id'], fresh_live)
+        second_payload = json.loads((await generator.__anext__())['data'])
+        assert second_payload['_event_id'] == second_id + 1
+        await generator.aclose()
+
+    asyncio.run(collect_events())
 
 
 def test_resolving_non_pending_approval_returns_conflict(tmp_path: Path):
