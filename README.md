@@ -27,6 +27,8 @@ Repo-specific agent/operator guidance lives in `AGENTS.md`.
 Important project docs:
 - `docs/policies/branch-protection-and-pr-flow.md`
 - `docs/policies/traceability.md`
+- `docs/design/2026-04-13-hermes-codex-multi-agent-coordination.md`
+- `docs/agents/`
 - `docs/research/`
 
 
@@ -37,6 +39,7 @@ Important project docs:
 - stream Hermes deltas, tool events, and final responses into the UI
 - persist local transcript state in SQLite
 - queue background jobs that continue server-side after the HTTP request returns
+- route background jobs to either Hermes or Codex, with Codex artifacts captured under `.tailchat/codex-jobs/`
 - run behind Tailscale Serve at either `/` or a subpath such as `/hermes`
 
 ## Current gaps
@@ -83,6 +86,8 @@ Requirements:
 - Python 3.11+
 - a working Hermes installation on the same machine
 - Hermes credentials configured locally
+- for Codex background jobs: `codex` on `PATH`
+- for Hermes↔Codex coordination: `am` on `PATH` (optional but recommended; the runner will use Agent Mail when available)
 
 Create a venv and install deps:
 
@@ -105,6 +110,32 @@ Then open:
 If you want to test subpath hosting locally, these also work because the app strips the `/hermes` prefix:
 - `http://127.0.0.1:8766/hermes`
 - `http://127.0.0.1:8766/hermes/`
+
+## Background executors
+
+Tailchat now supports two background-job executors:
+
+- `hermes` — the existing in-process Hermes provider path
+- `codex` — a Codex CLI worker path backed by `scripts/run_codex_background.py`
+
+The web UI exposes a small executor picker next to **Queue job**.
+
+Codex job behavior:
+- runs `codex exec --json --full-auto`
+- writes raw artifacts under `.tailchat/codex-jobs/<job-id>/`
+- stores the final assistant-style summary in the conversation transcript
+- uses Agent Mail bootstrap / reservation / notification hooks when `am` is available
+- automatically retries transient provider failures only before any Codex events or final output are produced, to avoid duplicating repo side effects
+
+Hermes foreground-turn behavior:
+- automatically retries transient provider failures only while the turn is still pre-side-effect
+- if a retry happens after text-only partial streaming, Tailchat resets the partial assistant output and restarts cleanly
+- if tools or approval state were already involved, Tailchat stops and surfaces a transient-provider explanation instead of retrying dangerously
+
+Important notes:
+- Codex jobs are intended for repo-facing implementation/review work while Tailchat stays responsive as the user-facing surface.
+- Agent Mail is used as a coordination supplement; the primary Tailchat job state still lives in SQLite.
+- For the architectural review and tradeoff analysis that led to this implementation, see `docs/research/2026-04-13-parallel-background-orchestration-research.md`.
 
 ## Persistent local service
 

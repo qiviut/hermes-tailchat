@@ -37,6 +37,7 @@ This is not mandatory for every emergency branch, but it is the preferred patter
 ### 3. Commits should reference bead IDs
 Best practice:
 - include one or more bead IDs in the commit body footer
+- for multi-agent slices, treat this as required completion evidence rather than a nice-to-have
 
 Example:
 
@@ -56,6 +57,8 @@ Why:
 
 ### 4. PR bodies should list the beads they advance
 Recommended PR body section:
+
+For multi-agent slices, PRs should also record tests run and any review-bead IDs that gate readiness.
 
 ```markdown
 ## Beads
