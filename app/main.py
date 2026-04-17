@@ -177,6 +177,38 @@ async def sync_attached_transcript(conversation_id: str) -> dict:
         conversation = store.update_last_hermes_import_at(conversation_id, max_timestamp)
     return conversation
 
+def _is_transient_provider_error(error_text: str | None) -> bool:
+    if not error_text:
+        return False
+    lowered = error_text.lower()
+    needles = (
+        'rate limit',
+        'rate_limit',
+        'too many requests',
+        '429',
+        'retry after',
+        'temporarily unavailable',
+        'temporary failure',
+        'overloaded',
+        'timeout',
+        'timed out',
+        'connection reset',
+        'connection aborted',
+        'connection error',
+        'try again',
+        'quota',
+        '503',
+        '529',
+    )
+    return any(needle in lowered for needle in needles)
+
+
+def _format_provider_error(error_text: str, *, prefix: str) -> str:
+    if _is_transient_provider_error(error_text):
+        return f'[{prefix} transient provider error] {error_text}\n\nTailchat already retries safe pre-side-effect cases automatically. If this happened after tools or streaming had started, the run stopped to avoid duplicating side effects. Please retry once the provider recovers.'
+    return f'[{prefix}] {error_text}'
+
+
 async def run_turn(conversation_id: str, assistant_message_id: str, user_message: str, run_id: str, job_id: str | None = None) -> None:
     conversation = store.get_conversation(conversation_id)
     hermes_session_id = (conversation or {}).get('hermes_session_id') or conversation_id
@@ -202,6 +234,25 @@ async def run_turn(conversation_id: str, assistant_message_id: str, user_message
             buffer += event.get('delta', '')
             store.update_message(assistant_message_id, buffer, status='streaming')
             await publish(conversation_id, {'event': 'message.delta', 'message_id': assistant_message_id, 'delta': event.get('delta', '')}, run_id=run_id)
+            return
+        if kind == 'run.retrying':
+            if event.get('reset_output'):
+                buffer = ''
+                store.update_message(assistant_message_id, '', status='queued')
+                await publish(conversation_id, {'event': 'message.retry_reset', 'message_id': assistant_message_id, 'run_id': run_id}, run_id=run_id)
+            await publish(
+                conversation_id,
+                {
+                    'event': 'run.retrying',
+                    'message_id': assistant_message_id,
+                    'attempt': event.get('attempt'),
+                    'next_attempt': event.get('next_attempt'),
+                    'backoff_seconds': event.get('backoff_seconds'),
+                    'error': event.get('error'),
+                    'reset_output': bool(event.get('reset_output')),
+                },
+                run_id=run_id,
+            )
             return
         if kind == 'approval.requested':
             data = event.get('approval', {})
@@ -231,13 +282,14 @@ async def run_turn(conversation_id: str, assistant_message_id: str, user_message
             return
         if kind == 'run.failed':
             err = event.get('error', 'unknown error')
-            store.update_message(assistant_message_id, f'[Hermes run failed] {err}', status='error')
+            rendered_error = _format_provider_error(err, prefix='Hermes run failed')
+            store.update_message(assistant_message_id, rendered_error, status='error')
             store.update_run(run_id, status='error', error_text=err)
             if job_id:
                 store.update_job(job_id, status='error', error_text=err, result_message_id=assistant_message_id)
             if conversation.get('link_mode') == 'attached':
                 store.update_last_hermes_import_at(conversation_id, time.time())
-            await publish(conversation_id, {'event': 'message.error', 'message_id': assistant_message_id, 'error': err, 'run_id': run_id, 'job_id': job_id}, run_id=run_id)
+            await publish(conversation_id, {'event': 'message.error', 'message_id': assistant_message_id, 'error': rendered_error, 'run_id': run_id, 'job_id': job_id, 'transient': _is_transient_provider_error(err)}, run_id=run_id)
             return
         await publish(conversation_id, dict(event, run_id=run_id, job_id=job_id), run_id=run_id)
 
@@ -245,22 +297,24 @@ async def run_turn(conversation_id: str, assistant_message_id: str, user_message
         await hermes.run_turn(hermes_session_id, conversation_history, user_message, on_event)
     except HermesProviderError as exc:
         err = str(exc)
-        store.update_message(assistant_message_id, f'[Hermes provider error] {err}', status='error')
+        rendered_error = _format_provider_error(err, prefix='Hermes provider error')
+        store.update_message(assistant_message_id, rendered_error, status='error')
         store.update_run(run_id, status='error', error_text=err)
         if job_id:
             store.update_job(job_id, status='error', error_text=err, result_message_id=assistant_message_id)
         if conversation.get('link_mode') == 'attached':
             store.update_last_hermes_import_at(conversation_id, time.time())
-        await publish(conversation_id, {'event': 'message.error', 'message_id': assistant_message_id, 'error': err, 'run_id': run_id, 'job_id': job_id}, run_id=run_id)
+        await publish(conversation_id, {'event': 'message.error', 'message_id': assistant_message_id, 'error': rendered_error, 'run_id': run_id, 'job_id': job_id, 'transient': _is_transient_provider_error(err)}, run_id=run_id)
     except Exception as exc:
         err = str(exc)
-        store.update_message(assistant_message_id, f'[Unexpected error] {err}', status='error')
+        rendered_error = _format_provider_error(err, prefix='Unexpected error')
+        store.update_message(assistant_message_id, rendered_error, status='error')
         store.update_run(run_id, status='error', error_text=err)
         if job_id:
             store.update_job(job_id, status='error', error_text=err, result_message_id=assistant_message_id)
         if conversation.get('link_mode') == 'attached':
             store.update_last_hermes_import_at(conversation_id, time.time())
-        await publish(conversation_id, {'event': 'message.error', 'message_id': assistant_message_id, 'error': err, 'run_id': run_id, 'job_id': job_id}, run_id=run_id)
+        await publish(conversation_id, {'event': 'message.error', 'message_id': assistant_message_id, 'error': rendered_error, 'run_id': run_id, 'job_id': job_id, 'transient': _is_transient_provider_error(err)}, run_id=run_id)
 
 
 async def retry_interrupted_run(run: dict, *, approval_id: str | None = None) -> dict[str, str] | None:

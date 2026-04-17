@@ -695,6 +695,11 @@ async function applyEvent(event) {
     if (el) el.textContent = (el.textContent || '') + (event.delta || '');
     setStatus('streaming');
   }
+  if (event.event === 'message.retry_reset') {
+    const el = document.getElementById('msg-' + event.message_id);
+    if (el) el.textContent = '…';
+    setStatus('retrying');
+  }
   if (event.event === 'message.completed') {
     const el = document.getElementById('msg-' + event.message_id);
     if (el) el.textContent = event.content || '';

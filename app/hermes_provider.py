@@ -60,6 +60,27 @@ def _is_transient_error(error_text: str | None) -> bool:
     return any(needle in lowered for needle in needles)
 
 
+def _parse_retry_after_seconds(error_text: str | None) -> int | None:
+    if not error_text:
+        return None
+    import re
+    patterns = (
+        r'retry after\s*(\d+)\s*s',
+        r'retry in\s*(\d+)\s*s',
+        r'after\s*(\d+)\s*seconds',
+        r'please try again in\s*(\d+)\s*s',
+    )
+    lowered = error_text.lower()
+    for pattern in patterns:
+        match = re.search(pattern, lowered)
+        if match:
+            try:
+                return max(1, int(match.group(1)))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 class LocalHermesProvider:
     def __init__(self) -> None:
         self._session_db = SessionDB()
@@ -126,23 +147,29 @@ class LocalHermesProvider:
         async with session_lock:
             loop = asyncio.get_running_loop()
             emitted_events = False
+            emitted_text = False
+            side_effect_risk = False
             max_attempts = max(1, int(__import__('os').getenv('TAILCHAT_TRANSIENT_RETRY_ATTEMPTS', '3')))
 
             def text_cb(delta: str | None) -> None:
-                nonlocal emitted_events
+                nonlocal emitted_events, emitted_text
                 if delta is None:
                     return
                 emitted_events = True
+                emitted_text = True
                 asyncio.run_coroutine_threadsafe(on_event({'event': 'message.delta', 'delta': delta}), loop)
 
             def tool_cb(event_type: str, tool_name: str = None, preview: str = None, args=None, **kwargs):
-                nonlocal emitted_events
+                nonlocal emitted_events, side_effect_risk
                 emitted_events = True
+                side_effect_risk = True
                 event = {'event': event_type, 'tool': tool_name, 'preview': preview, 'args': args or {}}
                 event.update(kwargs)
                 asyncio.run_coroutine_threadsafe(on_event(event), loop)
 
             def approval_notify(approval_data: dict) -> None:
+                nonlocal side_effect_risk
+                side_effect_risk = True
                 asyncio.run_coroutine_threadsafe(self._register_approval(session_id, approval_data, on_event), loop)
 
             def run_sync() -> dict[str, Any]:
@@ -165,8 +192,10 @@ class LocalHermesProvider:
                     error_text = str(exc)
                     result = None
 
-                if error_text and attempt < max_attempts and _is_transient_error(error_text) and not emitted_events and not has_blocking_approval(session_id):
-                    backoff_seconds = min(12, 2 ** (attempt - 1))
+                safe_to_retry = not side_effect_risk and not has_blocking_approval(session_id)
+                if error_text and attempt < max_attempts and _is_transient_error(error_text) and safe_to_retry:
+                    retry_after = _parse_retry_after_seconds(error_text)
+                    backoff_seconds = retry_after or min(20, 2 ** (attempt - 1))
                     await on_event({
                         'event': 'run.retrying',
                         'session_id': session_id,
@@ -174,7 +203,10 @@ class LocalHermesProvider:
                         'next_attempt': attempt + 1,
                         'backoff_seconds': backoff_seconds,
                         'error': error_text,
+                        'reset_output': emitted_text,
                     })
+                    emitted_events = False
+                    emitted_text = False
                     await asyncio.sleep(backoff_seconds)
                     continue
                 if error_text and result is None:

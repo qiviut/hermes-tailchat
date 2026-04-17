@@ -125,6 +125,12 @@ Codex job behavior:
 - writes raw artifacts under `.tailchat/codex-jobs/<job-id>/`
 - stores the final assistant-style summary in the conversation transcript
 - uses Agent Mail bootstrap / reservation / notification hooks when `am` is available
+- automatically retries transient provider failures only before any Codex events or final output are produced, to avoid duplicating repo side effects
+
+Hermes foreground-turn behavior:
+- automatically retries transient provider failures only while the turn is still pre-side-effect
+- if a retry happens after text-only partial streaming, Tailchat resets the partial assistant output and restarts cleanly
+- if tools or approval state were already involved, Tailchat stops and surfaces a transient-provider explanation instead of retrying dangerously
 
 Important notes:
 - Codex jobs are intended for repo-facing implementation/review work while Tailchat stays responsive as the user-facing surface.

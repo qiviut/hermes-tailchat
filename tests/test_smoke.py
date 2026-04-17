@@ -407,6 +407,33 @@ def test_startup_recovery_marks_incomplete_runs_jobs_and_preserves_pending_appro
         assert approvals[0]['status'] == 'pending'
 
 
+def test_rate_limited_text_only_retry_resets_partial_output(tmp_path: Path):
+    app, _db_path = load_app(tmp_path)
+    DummyLocalHermesProvider.scripted_events = [
+        {'event': 'message.delta', 'delta': 'partial '},
+        {'event': 'run.retrying', 'attempt': 1, 'next_attempt': 2, 'backoff_seconds': 1, 'error': '429 rate limit', 'reset_output': True},
+        {'event': 'message.delta', 'delta': 'final answer'},
+        {'event': 'run.completed', 'output': ''},
+    ]
+
+    with TestClient(app) as client:
+        convo = client.post('/api/conversations', json={'title': 'retry chat'}).json()
+        posted = client.post(f"/api/conversations/{convo['id']}/messages", json={'content': 'trigger retry'})
+        assert posted.status_code == 200
+        for _ in range(50):
+            messages = client.get(f"/api/conversations/{convo['id']}/messages").json()
+            assistant = next((message for message in reversed(messages) if message['role'] == 'assistant'), None)
+            if assistant and assistant['status'] == 'complete':
+                break
+            time.sleep(0.01)
+        messages = client.get(f"/api/conversations/{convo['id']}/messages").json()
+        assistant = next(message for message in reversed(messages) if message['role'] == 'assistant')
+        assert assistant['content'] == 'final answer'
+        history = client.get(f"/api/conversations/{convo['id']}/events/history?limit=20").json()
+        assert any(item['payload']['event'] == 'message.retry_reset' for item in history)
+
+
+
 def test_resolving_rehydrated_approval_retries_interrupted_run(tmp_path: Path):
     import sqlite3
 
