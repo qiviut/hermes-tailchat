@@ -130,6 +130,84 @@
       font-size: 12px;
       overflow-wrap: anywhere;
     }
+    .tool-event-group {
+      align-self: stretch;
+      max-width: min(900px, 100%);
+      border: 1px solid rgba(96, 165, 250, 0.28);
+      border-radius: 14px;
+      background: rgba(15, 23, 42, 0.72);
+      overflow: hidden;
+      backdrop-filter: blur(8px);
+      box-shadow: 0 10px 28px rgba(2, 6, 23, 0.18);
+    }
+    .tool-event-toggle {
+      width: 100%;
+      background: transparent;
+      border: 0;
+      border-radius: 0;
+      padding: 10px 12px;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 10px;
+      align-items: center;
+      text-align: left;
+    }
+    .tool-event-toggle:hover {
+      background: rgba(30, 41, 59, 0.6);
+    }
+    .tool-event-chevron {
+      color: #93c5fd;
+      font-size: 12px;
+      transition: transform 180ms ease;
+    }
+    .tool-event-group.open .tool-event-chevron {
+      transform: rotate(90deg);
+    }
+    .tool-event-summary {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+    }
+    .tool-event-latest {
+      color: #dbeafe;
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+    .tool-event-meta {
+      color: #93c5fd;
+      font-size: 11px;
+    }
+    .tool-event-history {
+      display: grid;
+      grid-template-rows: 0fr;
+      transition: grid-template-rows 180ms ease, opacity 180ms ease;
+      opacity: 0;
+    }
+    .tool-event-group.open .tool-event-history {
+      grid-template-rows: 1fr;
+      opacity: 1;
+    }
+    .tool-event-history-inner {
+      min-height: 0;
+      overflow: hidden;
+      border-top: 1px solid rgba(96, 165, 250, 0.18);
+      background: rgba(2, 6, 23, 0.46);
+    }
+    .tool-event-history-list {
+      margin: 0;
+      padding: 8px 12px 12px 30px;
+      display: grid;
+      gap: 8px;
+    }
+    .tool-event-history-list li {
+      color: #bfdbfe;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    .rate-limit-meta {
+      max-width: min(100%, 460px);
+      overflow-wrap: anywhere;
+    }
     .attach-panel {
       margin-top: 12px;
       padding: 12px;
@@ -352,6 +430,7 @@
         <div class="session-link">
           <div id="status" class="meta">idle</div>
           <div id="sessionMeta" class="meta">No linked Hermes session yet</div>
+          <div id="rateLimitMeta" class="meta rate-limit-meta">Rate limits unavailable until the provider returns valid headers.</div>
         </div>
       </div>
       <div id="messages" class="messages"></div>
@@ -393,6 +472,7 @@ const jobsEl = document.getElementById('jobs');
 const approvalsEl = document.getElementById('approvals');
 const statusEl = document.getElementById('status');
 const sessionMetaEl = document.getElementById('sessionMeta');
+const rateLimitMetaEl = document.getElementById('rateLimitMeta');
 const approvalModalEl = document.getElementById('approvalModal');
 const approvalModalTitleEl = document.getElementById('approvalModalTitle');
 const approvalModalSummaryEl = document.getElementById('approvalModalSummary');
@@ -411,6 +491,19 @@ let attachableSessions = [];
 let selectedAttachSessionId = null;
 let currentPendingApproval = null;
 let approvalModalDismissed = false;
+let toolEventGroups = new Map();
+const inspectableEventNames = new Set([
+  'job.queued',
+  'job.started',
+  'job.codex.started',
+  'approval.created',
+  'approval.resolved',
+  'approval.waiting',
+  'run.retrying',
+  'tool.started',
+  'tool.completed',
+  'reasoning.available',
+]);
 const basePath = (() => {
   const path = window.location.pathname;
   return path.startsWith('/hermes') ? '/hermes' : '';
@@ -419,6 +512,25 @@ const apiUrl = (path) => `${basePath}${path}`;
 
 function setStatus(text) { statusEl.textContent = text; }
 
+function renderRateLimitMeta(snapshot) {
+  if (!snapshot || !snapshot.available || !snapshot.compact) {
+    rateLimitMetaEl.textContent = 'Rate limits unavailable until the provider returns valid headers.';
+    return;
+  }
+  const provider = snapshot.provider ? `${snapshot.provider} ` : '';
+  rateLimitMetaEl.textContent = `${provider}rate limits · ${snapshot.compact}`;
+}
+
+async function loadRateLimitMeta() {
+  try {
+    const res = await fetch(apiUrl('/api/provider/rate-limit'));
+    const payload = await res.json().catch(() => null);
+    renderRateLimitMeta(res.ok ? payload : null);
+  } catch (_error) {
+    renderRateLimitMeta(null);
+  }
+}
+
 function formatApprovalDetails(approval) {
   const details = approval.details || {};
   const parts = [];
@@ -426,6 +538,122 @@ function formatApprovalDetails(approval) {
   if (approval.run_id) parts.push(`run ${approval.run_id}`);
   if (Array.isArray(details.pattern_keys) && details.pattern_keys.length) parts.push(`checks: ${details.pattern_keys.join(', ')}`);
   return parts.join(' · ');
+}
+
+function isInspectableEvent(event) {
+  return inspectableEventNames.has(event.event);
+}
+
+function formatInspectableEvent(event) {
+  if (event.event === 'job.queued' || event.event === 'job.started' || event.event === 'job.codex.started') {
+    return `${event.event}: ${(event.job && event.job.prompt) || 'background job'}`;
+  }
+  if (event.event === 'approval.created') {
+    return `approval requested: ${event.approval?.summary || event.approval?.details?.description || 'approval required'}`;
+  }
+  if (event.event === 'approval.resolved') {
+    return `approval resolved: ${event.approval?.resolution || event.provider_result?.decision || 'updated'}`;
+  }
+  if (event.event === 'approval.waiting') {
+    return 'approval waiting';
+  }
+  if (event.event === 'run.retrying') {
+    return `retrying after transient provider error: ${event.error || 'provider error'}`;
+  }
+  if (event.event === 'tool.started') {
+    return `tool started: ${event.tool || 'tool'}${event.preview ? ' — ' + event.preview : ''}`;
+  }
+  if (event.event === 'tool.completed') {
+    return `tool completed: ${event.tool || 'tool'}${event.error ? ' (error)' : ''}`;
+  }
+  if (event.event === 'reasoning.available') {
+    return 'reasoning available';
+  }
+  return null;
+}
+
+function toolEventGroupKey(event) {
+  return event.run_id || event.job_id || event.approval?.run_id || event.session_id || event.event;
+}
+
+function ensureToolEventGroup(groupKey) {
+  let group = toolEventGroups.get(groupKey);
+  if (group) return group;
+
+  const container = document.createElement('div');
+  container.className = 'tool-event-group';
+
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'tool-event-toggle';
+  toggle.setAttribute('aria-expanded', 'false');
+
+  const chevron = document.createElement('span');
+  chevron.className = 'tool-event-chevron';
+  chevron.textContent = '▶';
+
+  const summary = document.createElement('div');
+  summary.className = 'tool-event-summary';
+
+  const latest = document.createElement('div');
+  latest.className = 'tool-event-latest';
+
+  const meta = document.createElement('div');
+  meta.className = 'tool-event-meta';
+
+  summary.appendChild(latest);
+  summary.appendChild(meta);
+  toggle.appendChild(chevron);
+  toggle.appendChild(summary);
+
+  const latestBadge = document.createElement('span');
+  latestBadge.className = 'tool-event-meta';
+  toggle.appendChild(latestBadge);
+
+  const history = document.createElement('div');
+  history.className = 'tool-event-history';
+  const historyInner = document.createElement('div');
+  historyInner.className = 'tool-event-history-inner';
+  const historyList = document.createElement('ol');
+  historyList.className = 'tool-event-history-list';
+  historyInner.appendChild(historyList);
+  history.appendChild(historyInner);
+
+  toggle.onclick = () => {
+    const isOpen = container.classList.toggle('open');
+    toggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+  };
+
+  container.appendChild(toggle);
+  container.appendChild(history);
+  messagesEl.appendChild(container);
+  group = {container, latest, meta, latestBadge, historyList, count: 0};
+  toolEventGroups.set(groupKey, group);
+  return group;
+}
+
+function appendInspectableEvent(event) {
+  const description = formatInspectableEvent(event);
+  if (!description) return;
+  const group = ensureToolEventGroup(toolEventGroupKey(event));
+  group.count += 1;
+
+  const item = document.createElement('li');
+  item.textContent = description;
+  group.historyList.appendChild(item);
+  group.latest.textContent = description;
+  group.meta.textContent = group.count > 1 ? `Click to inspect ${group.count - 1} earlier event${group.count === 2 ? '' : 's'}.` : 'Latest event shown by default.';
+  group.latestBadge.textContent = group.count > 1 ? `${group.count - 1} hidden` : 'latest';
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function renderToolHistory(history) {
+  toolEventGroups = new Map();
+  messagesEl.querySelectorAll('.tool-event-group').forEach((node) => node.remove());
+  for (const item of history) {
+    if (!isInspectableEvent(item.payload || {})) continue;
+    appendInspectableEvent(item.payload);
+  }
 }
 
 function closeApprovalModal() {
@@ -668,23 +896,32 @@ function clearReconnectTimer() {
 
 async function refreshCurrentChatState() {
   if (!currentChat) return;
-  const [messagesRes, jobsRes, approvalsRes] = await Promise.all([
+  const [messagesRes, jobsRes, approvalsRes, historyRes, rateLimitRes] = await Promise.all([
     fetch(apiUrl(`/api/conversations/${currentChat}/messages`)),
     fetch(apiUrl(`/api/conversations/${currentChat}/jobs`)),
     fetch(apiUrl(`/api/conversations/${currentChat}/approvals`)),
+    fetch(apiUrl(`/api/conversations/${currentChat}/events/history?limit=200`)),
+    fetch(apiUrl('/api/provider/rate-limit')),
   ]);
-  const [messages, jobs, approvals] = await Promise.all([
+  const [messages, jobs, approvals, history, rateLimit] = await Promise.all([
     messagesRes.json(),
     jobsRes.json(),
     approvalsRes.json(),
+    historyRes.json(),
+    rateLimitRes.json().catch(() => null),
   ]);
   renderMessages(messages);
+  renderToolHistory(Array.isArray(history) ? history : []);
+  if (Array.isArray(history) && history.length) {
+    lastEventId = history[history.length - 1].id;
+  }
   jobsEl.innerHTML = jobs.map(job => {
     const thread = job.metadata && job.metadata.thread_id ? ` · thread ${job.metadata.thread_id}` : '';
     const artifactDir = job.artifact_dir ? `<div class="meta">artifacts ${job.artifact_dir}</div>` : '';
     return `<div class="job"><div>${job.prompt}</div><div class="meta">${job.executor || 'hermes'} · ${job.status} · run_after ${job.run_after}${thread}</div>${artifactDir}</div>`;
   }).join('') || '<div class="meta">No jobs yet</div>';
   renderApprovalsList(approvals);
+  renderRateLimitMeta(rateLimitRes.ok ? rateLimit : null);
 }
 
 async function applyEvent(event) {
@@ -704,30 +941,26 @@ async function applyEvent(event) {
     const el = document.getElementById('msg-' + event.message_id);
     if (el) el.textContent = event.content || '';
     setStatus('idle');
-    await loadJobs();
+    await Promise.all([loadJobs(), loadRateLimitMeta()]);
   }
   if (event.event === 'message.error') {
     const el = document.getElementById('msg-' + event.message_id);
     if (el) el.textContent = '[error] ' + event.error;
     setStatus('error');
-    await loadJobs();
+    await Promise.all([loadJobs(), loadRateLimitMeta()]);
   }
   if (event.event === 'job.queued' || event.event === 'job.started' || event.event === 'job.codex.started') {
     await loadJobs();
-    appendToolEvent(`${event.event}: ${(event.job && event.job.prompt) || ''}`);
   }
   if (event.event === 'approval.created' || event.event === 'approval.resolved' || event.event === 'approval.waiting') {
     if (event.event !== 'approval.resolved') setStatus('approval required');
     await loadApprovals();
-    appendToolEvent(event.event);
   }
   if (event.event === 'run.retrying') {
     setStatus(`retrying in ${event.backoff_seconds}s`);
-    appendToolEvent(`retrying after transient provider error: ${event.error}`);
+    await loadRateLimitMeta();
   }
-  if (event.event === 'tool.started') appendToolEvent(`tool started: ${event.tool}${event.preview ? ' — ' + event.preview : ''}`);
-  if (event.event === 'tool.completed') appendToolEvent(`tool completed: ${event.tool}${event.error ? ' (error)' : ''}`);
-  if (event.event === 'reasoning.available') appendToolEvent(`reasoning available`);
+  if (isInspectableEvent(event)) appendInspectableEvent(event);
 }
 
 async function replayMissedEvents() {

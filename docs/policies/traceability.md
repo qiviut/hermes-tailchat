@@ -98,6 +98,14 @@ A reporting script exists:
 scripts/traceability_report.py
 ```
 
+A non-trivial change / sidecar review helper also exists:
+
+```bash
+scripts/review_requirements.py --bead-id hermes-tailchat-y5k --changed-file app/main.py
+```
+
+By default the helper inspects the staged diff (`git diff --cached --name-only`), so it evaluates the slice you are about to ship rather than every branch change since `main`.
+
 Default usage:
 
 ```bash
@@ -116,6 +124,8 @@ You can also pass an explicit revision range:
 scripts/traceability_report.py origin/main..HEAD
 scripts/traceability_report.py HEAD~5..HEAD
 ```
+
+For deterministic policy enforcement, treat any slice as non-trivial when it changes executable behavior, spans multiple file clusters, changes policy/workflow/agent guidance, or couples implementation with new regression obligations. Single-cluster low-risk non-executable changes may remain trivial. Non-trivial slices require a sidecar review bead reference before they are treated as done.
 
 ## Current limitation
 

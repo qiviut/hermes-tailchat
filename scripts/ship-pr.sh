@@ -60,7 +60,7 @@ collect_beads() {
 }
 
 build_pr_body() {
-  local last_subject last_body beads tests_list security_notes release_notes bead_block
+  local last_subject last_body beads tests_list security_notes release_notes bead_block change_classification sidecar_review
   last_subject=$(git log -1 --pretty=%s)
   last_body=$(git log -1 --pretty=%b)
 
@@ -93,6 +93,20 @@ EOF
 EOF
 )
 
+  change_classification=$(cat <<'EOF'
+- Run `scripts/review_requirements.py --bead-id <implementation-bead> --review-bead-id <review-bead-if-any>` after staging the slice.
+- Classification: trivial | non-trivial
+- Reasons:
+EOF
+)
+
+  sidecar_review=$(cat <<'EOF'
+- [ ] Review bead: hermes-tailchat-...
+- [ ] Review requested in Agent Mail or PR comments
+- [ ] Review disposition recorded before treating the implementation bead as done
+EOF
+)
+
   cat <<EOF
 ## Summary
 - ${last_subject}
@@ -102,6 +116,12 @@ ${bead_block}
 ## Tests
 ${tests_list}
 
+## Change classification
+${change_classification}
+
+## Sidecar review
+${sidecar_review}
+
 ## Security notes
 ${security_notes}
 
@@ -110,6 +130,7 @@ ${release_notes}
 
 ## Notes
 - Created by scripts/ship-pr.sh to keep changes flowing through PRs.
+- For non-trivial slices, sidecar review is required before the implementation bead is treated as done.
 
 ${last_body}
 EOF

@@ -10,7 +10,14 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 INDEX_HTML = REPO / "app" / "static" / "index.html"
 TRACEABILITY_SCRIPT = REPO / "scripts" / "traceability_report.py"
+REVIEW_REQUIREMENTS_SCRIPT = REPO / "scripts" / "review_requirements.py"
 SHIP_PR_SCRIPT = REPO / "scripts" / "ship-pr.sh"
+
+
+def review_env(repo: Path | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    env["HERMES_TAILCHAT_REPO"] = str(repo or REPO)
+    return env
 
 
 def extract_css() -> str:
@@ -91,12 +98,305 @@ def test_traceability_report_reads_requested_range_head(tmp_path: Path) -> None:
     assert "feat: add later bead" not in completed.stdout
 
 
-def test_ship_pr_template_leaves_tests_unchecked_by_default() -> None:
+def test_review_requirements_classifies_non_trivial_change_and_requires_sidecar_review(tmp_path: Path) -> None:
+    fixture = tmp_path / "review-input.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "bead_id": "hermes-tailchat-y5k",
+                "changed_files": [
+                    "app/main.py",
+                    "scripts/ship-pr.sh",
+                    "docs/policies/traceability.md",
+                ],
+                "review_bead_id": None,
+            }
+        )
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(REVIEW_REQUIREMENTS_SCRIPT), "--input", str(fixture)],
+        cwd=REPO,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=review_env(),
+    )
+
+    assert completed.returncode == 2
+    payload = json.loads(completed.stdout)
+    assert payload["bead_id"] == "hermes-tailchat-y5k"
+    assert payload["classification"] == "non_trivial"
+    assert payload["requires_sidecar_review"] is True
+    assert payload["ready_to_close"] is False
+    assert payload["review_bead_id"] is None
+    assert payload["sidecar_review_status"] == "missing"
+    assert "changes_executable_behavior" in payload["reasons"]
+    assert "spans_multiple_file_clusters" in payload["reasons"]
+    assert "changes_policy_or_workflow" in payload["reasons"]
+
+
+def test_review_requirements_accepts_trivial_doc_only_change_without_sidecar_review(tmp_path: Path) -> None:
+    fixture = tmp_path / "review-input.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "bead_id": "hermes-tailchat-doc",
+                "changed_files": ["README.md", "docs/research/2026-04-19-hermes-memory-hierarchy-primitives.md"],
+            }
+        )
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(REVIEW_REQUIREMENTS_SCRIPT), "--input", str(fixture)],
+        cwd=REPO,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=review_env(),
+    )
+
+    payload = json.loads(completed.stdout)
+    assert payload["classification"] == "trivial"
+    assert payload["requires_sidecar_review"] is False
+    assert payload["ready_to_close"] is True
+    assert payload["sidecar_review_status"] == "not_required"
+    assert payload["reasons"] == ["docs_or_tests_only"]
+
+
+def test_review_requirements_treats_policy_docs_as_non_trivial_even_without_code_changes(tmp_path: Path) -> None:
+    fixture = tmp_path / "review-input.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "bead_id": "hermes-tailchat-h7m",
+                "changed_files": ["docs/policies/traceability.md"],
+            }
+        )
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(REVIEW_REQUIREMENTS_SCRIPT), "--input", str(fixture)],
+        cwd=REPO,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=review_env(),
+    )
+
+    assert completed.returncode == 2
+    payload = json.loads(completed.stdout)
+    assert payload["classification"] == "non_trivial"
+    assert payload["requires_sidecar_review"] is True
+    assert payload["ready_to_close"] is False
+    assert payload["sidecar_review_status"] == "missing"
+    assert payload["reasons"] == ["changes_policy_or_workflow"]
+
+
+def test_review_requirements_uses_staged_diff_by_default(tmp_path: Path) -> None:
+    repo = tmp_path / "review-staged-fixture"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.name", "Hermes Agent")
+    git(repo, "config", "user.email", "hermes@local")
+
+    (repo / "README.md").write_text("base\n")
+    (repo / "docs").mkdir()
+    (repo / "docs" / "notes.md").write_text("notes\n")
+    commit(repo, "chore: seed repo")
+
+    (repo / "docs" / "notes.md").write_text("notes updated\n")
+    git(repo, "add", "docs/notes.md")
+
+    completed = subprocess.run(
+        [sys.executable, str(REVIEW_REQUIREMENTS_SCRIPT), "--bead-id", "hermes-tailchat-y5k"],
+        cwd=REPO,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=review_env(repo),
+    )
+
+    payload = json.loads(completed.stdout)
+    assert payload["changed_files"] == ["docs/notes.md"]
+    assert payload["classification"] == "trivial"
+    assert payload["reasons"] == ["docs_or_tests_only"]
+
+
+def test_review_requirements_treats_single_cluster_low_risk_metadata_change_as_trivial(tmp_path: Path) -> None:
+    fixture = tmp_path / "review-input.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "bead_id": "hermes-tailchat-h7m",
+                "changed_files": [".editorconfig"],
+            }
+        )
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(REVIEW_REQUIREMENTS_SCRIPT), "--input", str(fixture)],
+        cwd=REPO,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=review_env(),
+    )
+    payload = json.loads(completed.stdout)
+
+    assert completed.returncode == 0
+    assert payload["classification"] == "trivial"
+    assert payload["reasons"] == ["single_cluster_low_risk_change"]
+    assert payload["file_clusters"] == [".editorconfig"]
+
+
+
+def test_review_requirements_treats_root_agents_file_as_agent_docs_cluster(tmp_path: Path) -> None:
+    fixture = tmp_path / "review-input.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "bead_id": "hermes-tailchat-h7m",
+                "changed_files": ["AGENTS.md"],
+            }
+        )
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(REVIEW_REQUIREMENTS_SCRIPT), "--input", str(fixture)],
+        cwd=REPO,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=review_env(),
+    )
+    payload = json.loads(completed.stdout)
+
+    assert payload["file_clusters"] == ["agent_docs"]
+    assert payload["classification"] == "non_trivial"
+    assert "changes_policy_or_workflow" in payload["reasons"]
+
+
+
+def test_review_requirements_uses_unclassified_reason_for_non_opaque_root_changes(tmp_path: Path) -> None:
+    fixture = tmp_path / "review-input.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "bead_id": "hermes-tailchat-h7m",
+                "changed_files": ["pyproject.toml"],
+            }
+        )
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(REVIEW_REQUIREMENTS_SCRIPT), "--input", str(fixture)],
+        cwd=REPO,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=review_env(),
+    )
+    payload = json.loads(completed.stdout)
+
+    assert payload["classification"] == "non_trivial"
+    assert payload["reasons"] == ["unclassified_non_trivial_change"]
+    assert payload["requires_sidecar_review"] is True
+
+
+
+def test_review_requirements_rejects_opaque_local_state_artifacts(tmp_path: Path) -> None:
+    fixture = tmp_path / "review-input.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "bead_id": "hermes-tailchat-doc",
+                "changed_files": ["tailchat.db"],
+            }
+        )
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(REVIEW_REQUIREMENTS_SCRIPT), "--input", str(fixture)],
+        cwd=REPO,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=review_env(),
+    )
+
+    assert completed.returncode == 2
+    payload = json.loads(completed.stdout)
+    assert payload["classification"] == "non_trivial"
+    assert payload["requires_sidecar_review"] is True
+    assert payload["ready_to_close"] is False
+    assert payload["reasons"] == ["opaque_or_stateful_artifact"]
+
+
+def test_review_requirements_treats_docs_and_tests_across_clusters_as_non_trivial(tmp_path: Path) -> None:
+    fixture = tmp_path / "review-input.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "bead_id": "hermes-tailchat-y5k",
+                "changed_files": ["docs/notes.md", "tests/test_smoke.py"],
+            }
+        )
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(REVIEW_REQUIREMENTS_SCRIPT), "--input", str(fixture)],
+        cwd=REPO,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=review_env(),
+    )
+
+    assert completed.returncode == 2
+    payload = json.loads(completed.stdout)
+    assert payload["classification"] == "non_trivial"
+    assert payload["requires_sidecar_review"] is True
+    assert payload["ready_to_close"] is False
+    assert "spans_multiple_file_clusters" in payload["reasons"]
+
+
+def test_review_requirements_rejects_empty_scope(tmp_path: Path) -> None:
+    repo = tmp_path / "review-empty-fixture"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.name", "Hermes Agent")
+    git(repo, "config", "user.email", "hermes@local")
+    (repo / "README.md").write_text("base\n")
+    commit(repo, "chore: seed repo")
+
+    completed = subprocess.run(
+        [sys.executable, str(REVIEW_REQUIREMENTS_SCRIPT), "--bead-id", "hermes-tailchat-y5k"],
+        cwd=REPO,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=review_env(repo),
+    )
+
+    assert completed.returncode == 2
+    payload = json.loads(completed.stdout)
+    assert payload["classification"] == "unscoped"
+    assert payload["ready_to_close"] is False
+    assert payload["requires_sidecar_review"] is False
+    assert payload["reasons"] == ["no_changed_files"]
+
+
+def test_ship_pr_template_leaves_tests_unchecked_by_default_and_records_review_requirements() -> None:
     script = SHIP_PR_SCRIPT.read_text()
 
     assert "- [ ] `python -m py_compile app/*.py tests/*.py`" in script
     assert "- [ ] `pytest -q tests/test_smoke.py`" in script
     assert "- [x] `python -m py_compile app/*.py tests/*.py`" not in script
+    assert "## Change classification" in script
+    assert "## Sidecar review" in script
+    assert "scripts/review_requirements.py --bead-id" in script
+    assert "- [ ] Review bead:" in script
 
 
 def test_mobile_portrait_layout_rules_are_present() -> None:

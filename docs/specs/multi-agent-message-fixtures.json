@@ -1,5 +1,136 @@
 {
   "schema_version": 1,
+  "common_envelope_fields": [
+    "schema_version",
+    "message_id",
+    "project_key",
+    "thread_id",
+    "from",
+    "to",
+    "subject",
+    "related_bead_ids",
+    "body",
+    "created_at"
+  ],
+  "optional_envelope_fields": [
+    "reply_to",
+    "in_reply_to",
+    "metadata"
+  ],
+  "subject_taxonomy": {
+    "canonical_thread_anchor": "implementation_bead_id",
+    "worker_to_worker": [
+      "start",
+      "handoff",
+      "review-request",
+      "review-feedback",
+      "blocker",
+      "done"
+    ],
+    "worker_to_hermes": [
+      "clarify",
+      "escalation",
+      "lesson",
+      "memory-request"
+    ],
+    "hermes_to_worker": [
+      "decision",
+      "policy",
+      "split-guidance",
+      "escalate-human"
+    ]
+  },
+  "body_contract": {
+    "always": [
+      "goal",
+      "state",
+      "recommended_next_step"
+    ],
+    "per_subject": {
+      "start": [
+        "scope",
+        "coordination_mode",
+        "recommended_next_step"
+      ],
+      "handoff": [
+        "scope",
+        "findings",
+        "risks",
+        "recommended_next_step"
+      ],
+      "review-request": [
+        "affected_files",
+        "tests_run",
+        "ask",
+        "recommended_next_step"
+      ],
+      "review-feedback": [
+        "reviewed_scope",
+        "evidence_checked",
+        "result",
+        "follow_up_bead_ids",
+        "recommended_next_step"
+      ],
+      "blocker": [
+        "affected_files",
+        "ask",
+        "recommended_next_step"
+      ],
+      "done": [
+        "review_outcome",
+        "evidence_checked",
+        "recommended_next_step"
+      ],
+      "clarify": [
+        "checked",
+        "ambiguity",
+        "options",
+        "recommended_option",
+        "affected_files",
+        "impact_if_unanswered",
+        "recommended_next_step"
+      ],
+      "escalation": [
+        "risk",
+        "options",
+        "recommended_option",
+        "recommended_next_step"
+      ],
+      "lesson": [
+        "problem",
+        "resolution",
+        "reusable_rule",
+        "suggested_destination",
+        "recommended_next_step"
+      ],
+      "memory-request": [
+        "question",
+        "why_now",
+        "recommended_next_step"
+      ],
+      "decision": [
+        "decision",
+        "affected_files",
+        "recommended_next_step"
+      ],
+      "policy": [
+        "policy_rule",
+        "source_of_authority",
+        "recommended_next_step"
+      ],
+      "split-guidance": [
+        "proposed_child_beads",
+        "reason_for_split",
+        "recommended_next_step"
+      ],
+      "escalate-human": [
+        "decision_request",
+        "options",
+        "recommended_option",
+        "recommended_next_step"
+      ]
+    }
+  },
   "subjects": [
     "[start][hermes-tailchat-example] Begin implementation",
     "[handoff][hermes-tailchat-example] Handing parser work to reviewer",
@@ -16,22 +147,161 @@
     "[split-guidance][hermes-tailchat-example] Split harness and enforcement work",
     "[escalate-human][hermes-tailchat-example] Need maintainer choice on branch protection"
   ],
-  "common_envelope_fields": [
-    "schema_version",
-    "thread_id",
-    "from",
-    "to",
-    "subject",
-    "related_bead_ids",
-    "body"
-  ],
+  "start": {
+    "schema_version": 1,
+    "message_id": "msg-start-hermes-tailchat-example",
+    "project_key": "hermes-tailchat",
+    "thread_id": "hermes-tailchat-example",
+    "from": "CodexBuilder-alpha",
+    "to": ["CodexReviewer-beta"],
+    "related_bead_ids": ["hermes-tailchat-example"],
+    "subject": "[start][hermes-tailchat-example] Begin implementation",
+    "created_at": "2026-04-14T00:00:00Z",
+    "body": {
+      "goal": "Implement message-contract helpers",
+      "state": "Worker claimed the bead and is starting with the spec and fixture slice.",
+      "scope": [
+        "docs/specs/multi-agent-message-contract.md",
+        "docs/specs/multi-agent-message-fixtures.json",
+        "tests/test_multi_agent_design_artifacts.py"
+      ],
+      "coordination_mode": "shared checkout with non-overlapping files",
+      "recommended_next_step": "Proceed with schema-first changes and request review once tests pass"
+    }
+  },
+  "handoff": {
+    "schema_version": 1,
+    "message_id": "msg-handoff-hermes-tailchat-example",
+    "project_key": "hermes-tailchat",
+    "thread_id": "hermes-tailchat-example",
+    "from": "CodexBuilder-alpha",
+    "to": ["CodexReviewer-beta"],
+    "related_bead_ids": ["hermes-tailchat-example"],
+    "subject": "[handoff][hermes-tailchat-example] Handing parser work to reviewer",
+    "created_at": "2026-04-14T00:05:00Z",
+    "body": {
+      "goal": "Transfer validation helper follow-through",
+      "state": "The contract docs are drafted and the remaining work is fixture verification.",
+      "scope": [
+        "tests/test_multi_agent_design_artifacts.py"
+      ],
+      "findings": [
+        "The implementation bead should remain the only routine thread anchor",
+        "Subject prefixes split cleanly into three routing classes"
+      ],
+      "risks": [
+        "Future helpers may drift if they embed their own prefix lists"
+      ],
+      "recommended_next_step": "Reviewer should validate fixture coverage against the contract before approving"
+    }
+  },
+  "review_request": {
+    "schema_version": 1,
+    "message_id": "msg-review-request-hermes-tailchat-example",
+    "project_key": "hermes-tailchat",
+    "thread_id": "hermes-tailchat-example",
+    "from": "CodexBuilder-alpha",
+    "to": ["CodexReviewer-beta"],
+    "related_bead_ids": ["hermes-tailchat-example", "hermes-tailchat-review-example"],
+    "subject": "[review-request][hermes-tailchat-example] Need reviewer pass",
+    "created_at": "2026-04-14T00:10:00Z",
+    "body": {
+      "goal": "Review AGENTS guidance and message-fixture docs",
+      "state": "Implementation committed locally with bead refs",
+      "affected_files": [
+        "docs/specs/multi-agent-message-contract.md",
+        "docs/specs/multi-agent-message-fixtures.json",
+        "tests/test_multi_agent_design_artifacts.py"
+      ],
+      "tests_run": [
+        "pytest -q tests/test_multi_agent_design_artifacts.py"
+      ],
+      "ask": "Confirm guidance completeness and identify any missing review/test traceability rules",
+      "recommended_next_step": "Reviewer should approve or request changes and reference the review bead in the reply"
+    }
+  },
+  "review_feedback": {
+    "schema_version": 1,
+    "message_id": "msg-review-feedback-hermes-tailchat-example",
+    "project_key": "hermes-tailchat",
+    "thread_id": "hermes-tailchat-example",
+    "from": "CodexReviewer-beta",
+    "to": ["CodexBuilder-alpha"],
+    "related_bead_ids": ["hermes-tailchat-example", "hermes-tailchat-review-example"],
+    "subject": "[review-feedback][hermes-tailchat-example] Found missing review disposition evidence",
+    "created_at": "2026-04-14T00:15:00Z",
+    "body": {
+      "goal": "Return review findings before the slice closes",
+      "state": "The contract and fixture coverage are good, but the review bead linkage still needs to be mentioned in the done example.",
+      "reviewed_scope": [
+        "docs/specs/multi-agent-message-contract.md",
+        "docs/specs/multi-agent-message-fixtures.json"
+      ],
+      "evidence_checked": [
+        "subject taxonomy",
+        "common envelope fields",
+        "fixture examples"
+      ],
+      "result": "request-changes",
+      "follow_up_bead_ids": [
+        "hermes-tailchat-review-example"
+      ],
+      "recommended_next_step": "Amend the done fixture to mention review disposition linkage"
+    }
+  },
+  "blocker": {
+    "schema_version": 1,
+    "message_id": "msg-blocker-hermes-tailchat-example",
+    "project_key": "hermes-tailchat",
+    "thread_id": "hermes-tailchat-example",
+    "from": "CodexReviewer-beta",
+    "to": ["CodexBuilder-alpha"],
+    "related_bead_ids": ["hermes-tailchat-example", "hermes-tailchat-review-example"],
+    "subject": "[blocker][hermes-tailchat-example] Reservation conflict on traceability helper",
+    "created_at": "2026-04-14T00:20:00Z",
+    "body": {
+      "goal": "Resolve a collision before review continues",
+      "state": "Reviewer found that the worker and another agent are editing the same traceability helper without explicit coordination.",
+      "affected_files": [
+        "scripts/ship-pr.sh",
+        "scripts/traceability_report.py"
+      ],
+      "ask": "Pause new edits and either reserve the shared files or move to an isolated worktree",
+      "recommended_next_step": "Coordinate in-thread, then resume review after the collision is resolved"
+    }
+  },
+  "done": {
+    "schema_version": 1,
+    "message_id": "msg-done-hermes-tailchat-example",
+    "project_key": "hermes-tailchat",
+    "thread_id": "hermes-tailchat-example",
+    "from": "CodexReviewer-beta",
+    "to": ["CodexBuilder-alpha"],
+    "related_bead_ids": ["hermes-tailchat-example", "hermes-tailchat-review-example"],
+    "subject": "[done][hermes-tailchat-example] Review disposition recorded",
+    "created_at": "2026-04-14T00:25:00Z",
+    "body": {
+      "goal": "Close the sidecar review bead after a non-blocking pass",
+      "state": "Reviewer checked the implementation bead, review bead, commit refs, and tests.",
+      "review_outcome": "approve",
+      "evidence_checked": [
+        "commit footer with bead ref",
+        "pytest evidence",
+        "review bead linkage"
+      ],
+      "recommended_next_step": "Implementation bead may proceed to final close once .beads is synced and PR notes reference this review disposition"
+    }
+  },
   "clarify": {
     "schema_version": 1,
+    "message_id": "msg-clarify-hermes-tailchat-example",
+    "project_key": "hermes-tailchat",
     "thread_id": "hermes-tailchat-example",
     "from": "CodexBuilder-alpha",
     "to": ["HermesOverseer"],
     "related_bead_ids": ["hermes-tailchat-example"],
     "subject": "[clarify][hermes-tailchat-example] Need decision on sidecar review trigger",
+    "created_at": "2026-04-14T00:30:00Z",
     "body": {
       "goal": "Implement AGENTS guidance for sidecar review beads",
       "state": "Worker has updated role guidance and design docs but needs a policy answer for trivial slices.",
@@ -55,34 +325,39 @@
       "recommended_next_step": "Hermes should answer with the repo-wide threshold so tests and helpers can enforce it consistently"
     }
   },
-  "review_request": {
+  "escalation": {
     "schema_version": 1,
+    "message_id": "msg-escalation-hermes-tailchat-example",
+    "project_key": "hermes-tailchat",
     "thread_id": "hermes-tailchat-example",
     "from": "CodexBuilder-alpha",
-    "to": ["CodexReviewer-beta"],
-    "related_bead_ids": ["hermes-tailchat-example", "hermes-tailchat-review-example"],
-    "subject": "[review-request][hermes-tailchat-example] Need reviewer pass",
+    "to": ["HermesOverseer"],
+    "related_bead_ids": ["hermes-tailchat-example"],
+    "subject": "[escalation][hermes-tailchat-example] Human decision needed on merge gate semantics",
+    "created_at": "2026-04-14T00:35:00Z",
     "body": {
-      "goal": "Review AGENTS guidance and message-fixture docs",
-      "state": "Implementation committed locally with bead refs",
-      "affected_files": [
-        "docs/design/2026-04-13-hermes-codex-multi-agent-coordination.md",
-        "docs/agents/codex-worker-AGENTS.md"
+      "goal": "Resolve a product-risk decision that workers cannot settle locally",
+      "state": "The worker found two viable branch-protection interpretations with different shipping friction.",
+      "risk": "Choosing the wrong merge gate semantics could weaken review guarantees or slow solo-maintainer velocity unnecessarily.",
+      "options": [
+        "require human approval for every non-trivial change",
+        "permit auto-merge after sidecar review and required checks",
+        "drop auto-merge entirely"
       ],
-      "tests_run": [
-        "pytest -q tests/test_multi_agent_design_artifacts.py"
-      ],
-      "ask": "Confirm guidance completeness and identify any missing review/test traceability rules",
-      "recommended_next_step": "Reviewer should approve or request changes and reference the review bead in the reply"
+      "recommended_option": "permit auto-merge after sidecar review and required checks",
+      "recommended_next_step": "Hermes should either answer from existing policy or escalate a concise decision request to the maintainer"
     }
   },
   "lesson": {
     "schema_version": 1,
+    "message_id": "msg-lesson-hermes-tailchat-example",
+    "project_key": "hermes-tailchat",
     "thread_id": "hermes-tailchat-example",
     "from": "CodexBuilder-alpha",
     "to": ["HermesOverseer"],
     "related_bead_ids": ["hermes-tailchat-example"],
     "subject": "[lesson][hermes-tailchat-example] Reusable traceability pitfall",
+    "created_at": "2026-04-14T00:40:00Z",
     "body": {
       "goal": "Capture a reusable process lesson for multi-agent completion evidence",
       "state": "A worker tried to mark an implementation bead done before the required PR artifact existed.",
@@ -93,58 +368,109 @@
       "recommended_next_step": "Hermes should update durable guidance and keep the rule discoverable for future workers"
     }
   },
-  "blocker": {
+  "memory_request": {
     "schema_version": 1,
+    "message_id": "msg-memory-request-hermes-tailchat-example",
+    "project_key": "hermes-tailchat",
     "thread_id": "hermes-tailchat-example",
-    "from": "CodexReviewer-beta",
-    "to": ["CodexBuilder-alpha"],
-    "related_bead_ids": ["hermes-tailchat-example", "hermes-tailchat-review-example"],
-    "subject": "[blocker][hermes-tailchat-example] Reservation conflict on traceability helper",
+    "from": "CodexBuilder-alpha",
+    "to": ["HermesOverseer"],
+    "related_bead_ids": ["hermes-tailchat-example"],
+    "subject": "[memory-request][hermes-tailchat-example] Need historical rationale for review policy",
+    "created_at": "2026-04-14T00:45:00Z",
     "body": {
-      "goal": "Resolve a collision before review continues",
-      "state": "Reviewer found that the worker and another agent are editing the same traceability helper without explicit coordination.",
-      "affected_files": [
-        "scripts/ship-pr.sh",
-        "scripts/traceability_report.py"
-      ],
-      "ask": "Pause new edits and either reserve the shared files or move to an isolated worktree",
-      "recommended_next_step": "Coordinate in-thread, then resume review after the collision is resolved"
-    }
-  },
-  "done": {
-    "schema_version": 1,
-    "thread_id": "hermes-tailchat-example",
-    "from": "CodexReviewer-beta",
-    "to": ["CodexBuilder-alpha"],
-    "related_bead_ids": ["hermes-tailchat-example", "hermes-tailchat-review-example"],
-    "subject": "[done][hermes-tailchat-example] Review disposition recorded",
-    "body": {
-      "goal": "Close the sidecar review bead after a non-blocking pass",
-      "state": "Reviewer checked the implementation bead, review bead, commit refs, and tests.",
-      "review_outcome": "approve",
-      "evidence_checked": [
-        "commit footer with bead ref",
-        "pytest evidence",
-        "review bead linkage"
-      ],
-      "recommended_next_step": "Implementation bead may proceed to final close once .beads is synced and PR notes reference this review disposition"
+      "goal": "Recover historical context before changing the workflow helper",
+      "state": "Current docs require review, but the original tradeoff between shipping speed and branch protection is not obvious from the repo alone.",
+      "question": "Why was sidecar review chosen as an additional readiness gate instead of replacing protected-branch review?",
+      "why_now": "The helper implementation needs to decide whether to model sidecar review as sufficient or supplemental evidence.",
+      "recommended_next_step": "Hermes should search memory/docs and answer with the rationale or escalate if the rationale is unavailable"
     }
   },
   "decision": {
     "schema_version": 1,
+    "message_id": "msg-decision-hermes-tailchat-example",
+    "project_key": "hermes-tailchat",
     "thread_id": "hermes-tailchat-example",
     "from": "HermesOverseer",
     "to": ["CodexBuilder-alpha"],
     "related_bead_ids": ["hermes-tailchat-example"],
     "subject": "[decision][hermes-tailchat-example] Use implementation bead as thread anchor",
+    "created_at": "2026-04-14T00:50:00Z",
     "body": {
       "goal": "Answer a workflow clarification without escalating to the human",
       "state": "Hermes reviewed the design and repo policy docs.",
       "decision": "Keep the implementation bead as the thread anchor and treat review bead IDs as related metadata.",
       "affected_files": [
-        "docs/design/2026-04-13-hermes-codex-multi-agent-coordination.md"
+        "docs/design/2026-04-13-hermes-codex-multi-agent-coordination.md",
+        "docs/specs/multi-agent-message-contract.md"
       ],
       "recommended_next_step": "Update fixtures and helper tests to enforce the single-thread rule"
+    }
+  },
+  "policy": {
+    "schema_version": 1,
+    "message_id": "msg-policy-hermes-tailchat-example",
+    "project_key": "hermes-tailchat",
+    "thread_id": "hermes-tailchat-example",
+    "from": "HermesOverseer",
+    "to": ["CodexBuilder-alpha"],
+    "related_bead_ids": ["hermes-tailchat-example"],
+    "subject": "[policy][hermes-tailchat-example] Sidecar review required for non-trivial changes",
+    "created_at": "2026-04-14T00:55:00Z",
+    "body": {
+      "goal": "State the governing rule for closeability checks",
+      "state": "Hermes confirmed the repo policy and AGENTS guidance align on this threshold.",
+      "policy_rule": "Non-trivial slices require sidecar review evidence before final close.",
+      "source_of_authority": [
+        "AGENTS.md",
+        "docs/agents/codex-worker-AGENTS.md",
+        "docs/policies/branch-protection-and-pr-flow.md"
+      ],
+      "recommended_next_step": "Bake the rule into helpers and fixture-based tests"
+    }
+  },
+  "split_guidance": {
+    "schema_version": 1,
+    "message_id": "msg-split-guidance-hermes-tailchat-example",
+    "project_key": "hermes-tailchat",
+    "thread_id": "hermes-tailchat-example",
+    "from": "HermesOverseer",
+    "to": ["CodexBuilder-alpha"],
+    "related_bead_ids": ["hermes-tailchat-example", "hermes-tailchat-review-example"],
+    "subject": "[split-guidance][hermes-tailchat-example] Split harness and enforcement work",
+    "created_at": "2026-04-14T01:00:00Z",
+    "body": {
+      "goal": "Keep the implementation slice small and parallelizable",
+      "state": "The current bead mixes schema formalization, policy enforcement, and integration harness work.",
+      "proposed_child_beads": [
+        "hermes-tailchat-v6g",
+        "hermes-tailchat-kh1",
+        "hermes-tailchat-y5k"
+      ],
+      "reason_for_split": "The contract can land first and unblock helpers and harnesses without bundling later enforcement logic.",
+      "recommended_next_step": "Create or continue the child beads and keep this thread anchored to the implementation bead"
+    }
+  },
+  "escalate_human": {
+    "schema_version": 1,
+    "message_id": "msg-escalate-human-hermes-tailchat-example",
+    "project_key": "hermes-tailchat",
+    "thread_id": "hermes-tailchat-example",
+    "from": "HermesOverseer",
+    "to": ["HumanMaintainer"],
+    "related_bead_ids": ["hermes-tailchat-example"],
+    "subject": "[escalate-human][hermes-tailchat-example] Need maintainer choice on branch protection",
+    "created_at": "2026-04-14T01:05:00Z",
+    "body": {
+      "goal": "Request a maintainer decision on a policy-sensitive tradeoff",
+      "state": "Repo docs allow required review and checks, but the exact auto-merge tolerance still needs maintainer confirmation.",
+      "decision_request": "Should solo-maintainer auto-merge remain allowed after sidecar review and required checks, or should human confirmation remain mandatory for every non-trivial slice?",
+      "options": [
+        "keep auto-merge allowed after real review + required checks",
+        "require manual maintainer confirmation for all non-trivial merges"
+      ],
+      "recommended_option": "keep auto-merge allowed after real review + required checks",
+      "recommended_next_step": "Human should choose the preferred merge gate so Hermes can answer future clarifications consistently"
     }
   }
 }

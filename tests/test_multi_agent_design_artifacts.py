@@ -85,26 +85,117 @@ def test_root_agents_points_to_role_specific_guidance_and_merge_policy():
         "If `am` is unavailable",
         "review is required before merge",
         "sidecar review improves bead readiness but does not replace repository branch protection",
+        "scripts/review_requirements.py",
+        "non-trivial",
     ]:
         assert phrase in text
 
 
-def test_message_fixtures_cover_required_contract_fields_and_common_envelope():
+def test_message_contract_spec_and_fixtures_cover_subject_taxonomy_and_envelope():
+    spec_path = ROOT / "docs/specs/multi-agent-message-contract.md"
+    spec_text = spec_path.read_text()
+    for phrase in [
+        "Canonical thread anchor",
+        "thread_id = implementation bead ID",
+        "Envelope fields",
+        "Required envelope fields",
+        "Optional envelope fields",
+        "Subject taxonomy",
+        "worker_to_worker",
+        "worker_to_hermes",
+        "hermes_to_worker",
+        "[start][bead-id]",
+        "[review-request][bead-id]",
+        "[clarify][bead-id]",
+        "[decision][bead-id]",
+        "Body contract",
+        "Routing expectations",
+        "docs/specs/multi-agent-message-fixtures.json",
+    ]:
+        assert phrase in spec_text
+
     path = ROOT / "docs/specs/multi-agent-message-fixtures.json"
     data = json.loads(path.read_text())
 
     assert data["schema_version"] == 1
     common_fields = data["common_envelope_fields"]
-    for field in ["schema_version", "thread_id", "from", "to", "subject", "related_bead_ids", "body"]:
+    for field in [
+        "schema_version",
+        "message_id",
+        "project_key",
+        "thread_id",
+        "from",
+        "to",
+        "subject",
+        "related_bead_ids",
+        "body",
+        "created_at",
+    ]:
         assert field in common_fields
 
-    required_message_types = [
-        "clarify",
-        "review_request",
-        "lesson",
+    optional_fields = data["optional_envelope_fields"]
+    for field in ["reply_to", "in_reply_to", "metadata"]:
+        assert field in optional_fields
+
+    taxonomy = data["subject_taxonomy"]
+    assert taxonomy["canonical_thread_anchor"] == "implementation_bead_id"
+    assert taxonomy["worker_to_worker"] == [
+        "start",
+        "handoff",
+        "review-request",
+        "review-feedback",
         "blocker",
         "done",
+    ]
+    assert taxonomy["worker_to_hermes"] == [
+        "clarify",
+        "escalation",
+        "lesson",
+        "memory-request",
+    ]
+    assert taxonomy["hermes_to_worker"] == [
         "decision",
+        "policy",
+        "split-guidance",
+        "escalate-human",
+    ]
+
+    body_contract = data["body_contract"]
+    for field in ["goal", "state", "recommended_next_step"]:
+        assert field in body_contract["always"]
+    for key in [
+        "start",
+        "handoff",
+        "review-request",
+        "review-feedback",
+        "blocker",
+        "done",
+        "clarify",
+        "escalation",
+        "lesson",
+        "memory-request",
+        "decision",
+        "policy",
+        "split-guidance",
+        "escalate-human",
+    ]:
+        assert key in body_contract["per_subject"]
+
+    required_message_types = [
+        "start",
+        "handoff",
+        "review_request",
+        "review_feedback",
+        "blocker",
+        "done",
+        "clarify",
+        "escalation",
+        "lesson",
+        "memory_request",
+        "decision",
+        "policy",
+        "split_guidance",
+        "escalate_human",
     ]
     for key in required_message_types:
         assert key in data, f"missing fixture {key}"
@@ -113,6 +204,8 @@ def test_message_fixtures_cover_required_contract_fields_and_common_envelope():
             assert envelope_key in fixture, f"{key} missing {envelope_key}"
         assert fixture["thread_id"] in fixture["subject"]
         assert fixture["related_bead_ids"]
+        assert fixture["project_key"] == "hermes-tailchat"
+        assert fixture["message_id"].startswith("msg-")
 
     clarify = data["clarify"]
     assert clarify["subject"].startswith("[clarify][")
@@ -150,6 +243,11 @@ def test_message_fixtures_cover_required_contract_fields_and_common_envelope():
     for key in ["goal", "state", "review_outcome", "evidence_checked", "recommended_next_step"]:
         assert key in done["body"]
 
+    decision = data["decision"]
+    assert decision["subject"].startswith("[decision][")
+    assert decision["body"]["decision"]
+    assert decision["body"]["recommended_next_step"]
+
 
 def test_implementation_plan_exists_and_matches_design_backlog():
     path = ROOT / "docs/plans/2026-04-14-multi-agent-coordination-implementation.md"
@@ -181,11 +279,14 @@ def test_bead_graph_contains_new_enabling_slices_for_multi_agent_work():
     ]:
         assert bead_id in by_id, f"missing bead {bead_id}"
 
-    assert by_id["hermes-tailchat-v6g"]["status"] == "open"
-    assert by_id["hermes-tailchat-w2n"]["status"] == "open"
-    assert by_id["hermes-tailchat-y5k"]["status"] == "open"
-    assert by_id["hermes-tailchat-z8q"]["status"] == "open"
-    assert by_id["hermes-tailchat-h7m"]["status"] == "open"
+    for bead_id in [
+        "hermes-tailchat-v6g",
+        "hermes-tailchat-w2n",
+        "hermes-tailchat-y5k",
+        "hermes-tailchat-z8q",
+        "hermes-tailchat-h7m",
+    ]:
+        assert by_id[bead_id]["status"] != "cancelled"
 
     v6g_deps = by_id["hermes-tailchat-v6g"].get("dependencies", [])
     assert any(dep["depends_on_id"] == "hermes-tailchat-bar" and dep["type"] == "parent-child" for dep in v6g_deps)
