@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Hermes dreaming telemetry hourly
+
+[Timer]
+OnBootSec=10m
+OnUnitActiveSec=1h
+Unit=hermes-tailchat-dream.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
