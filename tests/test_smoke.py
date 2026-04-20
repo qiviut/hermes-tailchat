@@ -22,6 +22,7 @@ class DummyLocalHermesProvider:
     scripted_events: list[dict] | None = None
     pending_approvals: dict[str, dict] = {}
     run_turn_calls: list[dict] = []
+    rate_limit_snapshot: dict | None = None
 
     async def run_turn(self, session_id, conversation_history, user_message, on_event):
         self.run_turn_calls.append({
@@ -96,6 +97,9 @@ class DummyLocalHermesProvider:
     async def get_session_messages(self, session_id):
         return list(self.session_messages.get(session_id, []))
 
+    def get_rate_limit_snapshot(self):
+        return self.rate_limit_snapshot or {'available': False, 'provider': 'openai', 'compact': None}
+
 
 def load_app(tmp_path: Path):
     db_path = tmp_path / "tailchat-test.db"
@@ -105,6 +109,7 @@ def load_app(tmp_path: Path):
     DummyLocalHermesProvider.scripted_events = None
     DummyLocalHermesProvider.pending_approvals = {}
     DummyLocalHermesProvider.run_turn_calls = []
+    DummyLocalHermesProvider.rate_limit_snapshot = None
     DummyLocalHermesProvider.session_messages = {
         'existing-alpha': [
             {'id': 1, 'role': 'user', 'content': 'hello from cli', 'timestamp': 10.0},
@@ -419,7 +424,7 @@ def test_rate_limited_text_only_retry_resets_partial_output(tmp_path: Path):
     app, _db_path = load_app(tmp_path)
     DummyLocalHermesProvider.scripted_events = [
         {'event': 'message.delta', 'delta': 'partial '},
-        {'event': 'run.retrying', 'attempt': 1, 'next_attempt': 2, 'backoff_seconds': 1, 'error': '429 rate limit', 'reset_output': True},
+        {'event': 'run.retrying', 'attempt': 1, 'next_attempt': 2, 'backoff_seconds': 1, 'error': '503 service unavailable', 'reset_output': True},
         {'event': 'message.delta', 'delta': 'final answer'},
         {'event': 'run.completed', 'output': ''},
     ]
@@ -654,3 +659,53 @@ def test_resolving_non_pending_approval_returns_conflict(tmp_path: Path):
         main_module.store.update_approval_status(approval['id'], 'expired', 'restart')
         resolved = client.post(f"/api/approvals/{approval['id']}/resolve", json={'resolution': 'approved'})
         assert resolved.status_code == 409
+
+
+def test_rate_limit_status_endpoint_handles_missing_provider_data(tmp_path: Path):
+    app, _db_path = load_app(tmp_path)
+
+    import app.main as main_module
+    main_module.hermes.get_rate_limit_snapshot = lambda: {'available': False, 'provider': 'openai', 'compact': None}
+
+    with TestClient(app) as client:
+        response = client.get('/api/provider/rate-limit')
+        assert response.status_code == 200
+        assert response.json() == {'available': False, 'provider': 'openai', 'compact': None}
+
+
+def test_rate_limit_status_endpoint_returns_compact_snapshot_when_available(tmp_path: Path):
+    app, _db_path = load_app(tmp_path)
+
+    import app.main as main_module
+    main_module.hermes.get_rate_limit_snapshot = lambda: {
+        'available': True,
+        'provider': 'openai',
+        'compact': 'RPM: 58/60 | TPM: 92K/100K',
+        'captured_at': 123.0,
+        'buckets': {
+            'requests_min': {'limit': 60, 'remaining': 58, 'reset_seconds': 12},
+            'tokens_min': {'limit': 100000, 'remaining': 92000, 'reset_seconds': 12},
+        },
+    }
+
+    with TestClient(app) as client:
+        response = client.get('/api/provider/rate-limit')
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload['available'] is True
+        assert payload['provider'] == 'openai'
+        assert payload['compact'] == 'RPM: 58/60 | TPM: 92K/100K'
+        assert payload['buckets']['requests_min']['remaining'] == 58
+
+
+def test_index_page_includes_folded_tool_events_ui_and_rate_limit_indicator(tmp_path: Path):
+    app, _db_path = load_app(tmp_path)
+
+    with TestClient(app) as client:
+        response = client.get('/')
+        assert response.status_code == 200
+        html = response.text
+        assert 'id="rateLimitMeta"' in html
+        assert 'tool-event-group' in html
+        assert 'function renderToolHistory' in html
+        assert 'function renderRateLimitMeta' in html
