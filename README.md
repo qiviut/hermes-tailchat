@@ -217,6 +217,40 @@ That installs a user-level path unit which watches:
 
 When local `main` advances, systemd runs `scripts/deploy-local.sh` automatically.
 
+## Untrusted ingestion foundation
+
+This repo now includes a deterministic first-pass ingestion toolkit for hostile or semi-hostile content such as websites, email, Discord, X, logs, source code, scripts, pipeline configs, and git metadata.
+
+Artifacts shipped in this slice:
+- `app/untrusted_ingest.py` — deterministic reducers and normalized artifact generation
+- `scripts/untrusted_ingest.py` — CLI for `text`, `json`, and `git` inspection
+- `app/codex_sanitizer.py` — isolated Codex sanitizer worker for normalized artifacts
+- `scripts/untrusted_codex_sanitize.py` — CLI that runs deterministic reduction first and then a Codex sanitizer pass
+- `config/untrusted_ingest/pipelines/*.json` — versioned source profiles and redaction/budget rules
+- `docs/specs/untrusted-ingestion-*.schema.json` — record/config schemas
+- `docs/specs/untrusted-sanitizer-output.schema.json` — schema-bound low-privilege Codex sanitizer result
+- `docs/design/2026-04-21-untrusted-ingestion-foundation.md` — trust-boundary rationale
+
+The intent is to reduce and sanitize hostile input before any higher-authority agent or model sees it. The default pattern is deterministic reduction first, then a low-privilege sanitizer model if semantic classification is needed, and only then escalation to stronger consumers.
+
+The default model-backed sanitizer path uses Codex as an isolated worker with:
+- `--sandbox read-only`
+- `--skip-git-repo-check`
+- `--ephemeral`
+- `--ignore-user-config`
+- a minimal environment allowlist carrying only Codex/OpenAI auth and basic process/runtime variables
+- explicit `--model` selection so high-volume filtering can stay on a cheaper model tier
+
+Useful commands:
+
+```bash
+python3 scripts/untrusted_ingest.py text --source-type email --source-ref message:123 < suspicious.txt
+python3 scripts/untrusted_ingest.py json --source-type x --source-ref tweet:123 --file payload.json
+python3 scripts/untrusted_ingest.py git --repo . --revision HEAD
+python3 scripts/untrusted_codex_sanitize.py --model gpt-5-mini text --source-type email --source-ref message:123 < suspicious.txt
+python3 scripts/untrusted_codex_sanitize.py --model gpt-5-mini git --repo . --revision HEAD
+```
+
 ## Deterministic Hermes dreaming toolkit
 
 This repo also includes a deterministic foundation for Hermes "dreaming":

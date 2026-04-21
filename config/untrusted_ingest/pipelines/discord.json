@@ -1,0 +1,13 @@
+{
+  "source_type": "discord",
+  "aliases": ["chat", "message"],
+  "field_allowlist": ["author", "channel", "timestamp", "text", "attachments", "embeds"],
+  "max_lines": 220,
+  "max_chars": 10000,
+  "detect_commands": true,
+  "detect_secret_patterns": true,
+  "regex_redactions": [
+    {"pattern": "<@!?\\d+>", "replacement": "@mention"}
+  ],
+  "notes": ["chat_messages_are_untrusted"]
+}

@@ -1,0 +1,14 @@
+{
+  "source_type": "email",
+  "aliases": ["mail"],
+  "field_allowlist": ["from", "to", "subject", "date", "text", "attachments"],
+  "max_lines": 220,
+  "max_chars": 12000,
+  "detect_commands": true,
+  "detect_secret_patterns": true,
+  "regex_redactions": [
+    {"pattern": "(?m)^>.*$", "replacement": "[quoted line elided]"},
+    {"pattern": "(?is)<img[^>]+>", "replacement": "[remote image elided]"}
+  ],
+  "notes": ["email_html_and_headers_are_untrusted"]
+}

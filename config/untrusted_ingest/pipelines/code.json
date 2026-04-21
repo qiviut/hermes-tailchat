@@ -1,0 +1,14 @@
+{
+  "source_type": "code",
+  "aliases": ["source", "script"],
+  "field_allowlist": ["path", "language", "text", "imports", "commands"],
+  "max_lines": 220,
+  "max_chars": 12000,
+  "detect_commands": true,
+  "detect_secret_patterns": true,
+  "regex_redactions": [
+    {"pattern": "(?i)(data:[^\\s]{60,})", "replacement": "[data-url elided]"},
+    {"pattern": "(?m)^[+\\-]?\\s*#\\s*pragma:.*$", "replacement": "[pragma elided]"}
+  ],
+  "notes": ["treat_comments_as_untrusted_instructions"]
+}

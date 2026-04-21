@@ -1,0 +1,14 @@
+{
+  "source_type": "web",
+  "aliases": ["html", "website"],
+  "field_allowlist": ["url", "title", "text", "links", "content_type"],
+  "max_lines": 240,
+  "max_chars": 12000,
+  "detect_commands": true,
+  "detect_secret_patterns": true,
+  "regex_redactions": [
+    {"pattern": "(?is)<script.*?</script>", "replacement": "[script elided]"},
+    {"pattern": "(?is)<style.*?</style>", "replacement": "[style elided]"},
+    {"pattern": "(?i)utm_[a-z_]+=[^&\\s]+", "replacement": "utm_[redacted]"}
+  ]
+}
