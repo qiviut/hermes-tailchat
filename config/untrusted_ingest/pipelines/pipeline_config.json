@@ -1,0 +1,14 @@
+{
+  "source_type": "pipeline_config",
+  "aliases": ["ci", "workflow", "config"],
+  "field_allowlist": ["path", "text", "triggers", "permissions", "commands"],
+  "max_lines": 260,
+  "max_chars": 14000,
+  "detect_commands": true,
+  "detect_secret_patterns": true,
+  "high_risk_if_paths_match": [".github/workflows", "systemd/", "docker-compose", "compose.yaml", "terraform", "opentofu"],
+  "regex_redactions": [
+    {"pattern": "(?i)(password|token|secret)\\s*[:=]\\s*[^\\s]+", "replacement": "\\1=[redacted]"}
+  ],
+  "notes": ["ci_or_deploy_policy_surface"]
+}
