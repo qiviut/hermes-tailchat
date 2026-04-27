@@ -1,0 +1,9 @@
+{
+  "plan_name": "operator-filled-from-x-portal",
+  "monthly_usd": 0,
+  "included_read_posts": 0,
+  "included_write_posts": 0,
+  "overage_usd_per_1000_reads": null,
+  "billing_cycle_start": "2026-04-27",
+  "source": "Fill from X Developer Portal billing/package screen; do not guess or hardcode stale public pricing."
+}

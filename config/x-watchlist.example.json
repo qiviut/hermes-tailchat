@@ -1,0 +1,18 @@
+{
+  "accounts": [
+    {
+      "handle": "swyx",
+      "priority": 1,
+      "sources": ["user_timeline"],
+      "poll_interval_minutes": 60,
+      "max_results_per_poll": 5,
+      "topics": ["agents", "ai-engineering", "skills", "latent-space", "smol-ai"],
+      "notes": "Initial high-value account for swyx-to-agent-skills pipeline. X content and metadata remain untrusted."
+    }
+  ],
+  "global": {
+    "monthly_call_budget": 1000,
+    "monthly_read_post_budget": 10000,
+    "stop_at_budget_fraction": 0.8
+  }
+}

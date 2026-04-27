@@ -73,6 +73,28 @@ Environment variables used by the app:
 - `HERMES_API_KEY`
 - `TAILCHAT_DB_PATH` default: `./tailchat.db`
 
+## X account monitoring
+
+The X monitor is a local operator tool for watching high-value accounts such as `swyx` and feeding their posts through the untrusted-ingestion boundary before any agent-skill extraction.
+
+Security model:
+- X API payloads, including metadata, are hostile input.
+- Raw responses are spooled under ignored `data/x/raw/` and are not sent directly to privileged agents.
+- Normalized artifacts are written under `data/x/normalized/` using `app.untrusted_ingest` with `source_type=x`.
+- `xurl` credentials live outside git, currently under `~/.config/hermes/secrets/x-api/`.
+- The monitor creates a temporary private `.xurl` config for each run rather than committing or printing secrets.
+
+Example commands:
+
+```bash
+python3 scripts/x_monitor.py smoke --handle swyx
+python3 scripts/x_monitor.py check-config --watchlist config/x-watchlist.example.json
+python3 scripts/x_monitor.py poll --watchlist config/x-watchlist.example.json --account swyx
+python3 scripts/x_monitor.py report-costs --ledger data/x/usage.jsonl --billing config/x-billing-plan.example.json
+```
+
+Before relying on cost forecasts, copy `config/x-billing-plan.example.json` to a local operator config and fill it from the current X Developer Portal billing/package screen. Do not hardcode public pricing claims into code; X plan limits and included reads change.
+
 Example local env file:
 
 ```bash

@@ -8,5 +8,7 @@ __pycache__/
 *.egg-info/
 .tailchat/
 
+data/x/
+
 # bv (beads viewer) local config and caches
 .bv/
