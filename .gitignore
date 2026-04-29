@@ -9,6 +9,7 @@ __pycache__/
 .tailchat/
 
 data/x/
+data/swyx/
 
 # bv (beads viewer) local config and caches
 .bv/
