@@ -1,0 +1,14 @@
+{
+  "items": [
+    {
+      "source_type": "web",
+      "source_ref": "smol:example",
+      "source_url": "https://smol.ai/example",
+      "raw_fields": {
+        "title": "Example swyx item",
+        "text": "A bounded local fixture for dry-run testing.",
+        "links": []
+      }
+    }
+  ]
+}

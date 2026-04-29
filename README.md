@@ -271,6 +271,28 @@ python3 scripts/untrusted_codex_sanitize.py --model gpt-5-mini text --source-typ
 python3 scripts/untrusted_codex_sanitize.py --model gpt-5-mini git --repo . --revision HEAD
 ```
 
+## Swyx-to-agent-skills ingestion slice
+
+This repo includes an initial deterministic-first pipeline for collecting swyx-related source items and turning them into reviewed skill-candidate artifacts without auto-installing external-content-derived instructions.
+
+Artifacts shipped in this slice:
+- `app/swyx_ingest/spool.py` — stable content hashes, deterministic spool paths, and atomic JSON writes
+- `app/swyx_ingest/sources.py` — source item models, manual JSON import, xurl JSON parsing, and a safe xurl auth capability check
+- `app/swyx_ingest/extract.py` — routes source items through `app.untrusted_ingest` before downstream consumption
+- `app/swyx_ingest/skill_draft.py` — validates candidate observations and renders review-required `SKILL.md` drafts
+- `scripts/swyx_to_skills.py` — CLI for dry-run/manual import and bounded xurl query ingestion
+- `docs/specs/swyx-skill-candidate.schema.json` — candidate observation contract
+
+Raw and normalized run artifacts go under ignored `data/swyx/` by default. Candidate drafts are review artifacts only; nothing is promoted into Hermes skills without an explicit later promotion step.
+
+Useful commands:
+
+```bash
+python3 scripts/swyx_to_skills.py --manual-json tests/fixtures/swyx/manual-items.json --dry-run
+PATH="$HOME/go/bin:$HOME/.local/bin:$PATH" python3 scripts/swyx_to_skills.py --x-query 'from:swyx' --x-limit 5 --dry-run
+python3 scripts/swyx_to_skills.py --manual-json local-items.json --spool-root data/swyx --reduce
+```
+
 Useful commands:
 
 ```bash
