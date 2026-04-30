@@ -24,10 +24,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--spool-root", default="data/swyx", help="Directory for raw/normalized/candidate artifacts")
     parser.add_argument("--manual-json", help="Local JSON file with SourceItem-like objects")
     parser.add_argument("--x-query", help="Bounded xurl search query, e.g. 'from:swyx'")
-    parser.add_argument("--x-limit", type=int, default=10)
+    parser.add_argument("--x-limit", type=int, default=10, help="xurl result limit, 1-100")
     parser.add_argument("--reduce", action="store_true", help="Also write normalized untrusted-ingest artifacts")
     parser.add_argument("--dry-run", action="store_true", help="Parse/fetch and summarize without writing files")
     args = parser.parse_args(argv)
+    if args.x_limit < 1 or args.x_limit > 100:
+        parser.error("--x-limit must be between 1 and 100")
 
     items = []
     if args.manual_json:
