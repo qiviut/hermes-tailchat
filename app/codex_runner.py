@@ -7,19 +7,56 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .retry_policy import can_auto_retry_error, is_transient_error, parse_retry_after_seconds
-
 
 class CodexRunnerError(RuntimeError):
     pass
 
 
 def _is_transient_codex_error(error_text: str | None) -> bool:
-    return is_transient_error(error_text)
+    if not error_text:
+        return False
+    lowered = error_text.lower()
+    needles = (
+        'rate limit',
+        'rate_limit',
+        'too many requests',
+        '429',
+        'retry after',
+        'temporarily unavailable',
+        'temporary failure',
+        'overloaded',
+        'timeout',
+        'timed out',
+        'connection reset',
+        'connection aborted',
+        'connection error',
+        'try again',
+        'quota',
+        '503',
+        '529',
+    )
+    return any(needle in lowered for needle in needles)
 
 
 def _parse_retry_after_seconds(error_text: str | None) -> int | None:
-    return parse_retry_after_seconds(error_text)
+    if not error_text:
+        return None
+    import re
+    patterns = (
+        r'retry after\s*(\d+)\s*s',
+        r'retry in\s*(\d+)\s*s',
+        r'after\s*(\d+)\s*seconds',
+        r'please try again in\s*(\d+)\s*s',
+    )
+    lowered = error_text.lower()
+    for pattern in patterns:
+        match = re.search(pattern, lowered)
+        if match:
+            try:
+                return max(1, int(match.group(1)))
+            except (TypeError, ValueError):
+                return None
+    return None
 
 
 def _can_retry_codex_attempt(result: dict[str, Any]) -> bool:
@@ -27,8 +64,7 @@ def _can_retry_codex_attempt(result: dict[str, Any]) -> bool:
         return False
     if (result.get('events_output') or '').strip():
         return False
-    error_text = result.get('status', {}).get('error') or result.get('stderr') or result.get('stdout')
-    return can_auto_retry_error(error_text)
+    return _is_transient_codex_error(result.get('status', {}).get('error') or result.get('stderr') or result.get('stdout'))
 
 
 def repo_root() -> Path:

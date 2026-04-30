@@ -134,29 +134,22 @@ artifacts.mkdir(parents=True, exist_ok=True)
 
 def test_transient_codex_error_helpers_detect_safe_retry_conditions() -> None:
     assert _is_transient_codex_error('429 rate limit; retry after 3s')
-    assert not _can_retry_codex_attempt({
+    assert _can_retry_codex_attempt({
         'status': {'error': '429 rate limit; retry after 3s'},
         'stderr': '',
         'stdout': '',
         'final_output': '',
         'events_output': '',
     })
-    assert _can_retry_codex_attempt({
-        'status': {'error': '503 service unavailable; retry after 3s'},
-        'stderr': '',
-        'stdout': '',
-        'final_output': '',
-        'events_output': '',
-    })
     assert not _can_retry_codex_attempt({
-        'status': {'error': '503 service unavailable; retry after 3s'},
+        'status': {'error': '429 rate limit; retry after 3s'},
         'stderr': '',
         'stdout': '',
         'final_output': 'partial summary',
         'events_output': '',
     })
     assert not _can_retry_codex_attempt({
-        'status': {'error': '503 service unavailable; retry after 3s'},
+        'status': {'error': '429 rate limit; retry after 3s'},
         'stderr': '',
         'stdout': '',
         'final_output': '',
@@ -180,7 +173,7 @@ artifacts.mkdir(parents=True, exist_ok=True)
 attempt = int(state_file.read_text()) + 1 if state_file.exists() else 1
 state_file.write_text(str(attempt))
 if attempt == 1:
-    (artifacts / 'status.json').write_text(json.dumps({'state': 'error', 'error': '503 service unavailable; retry after 1s'}))
+    (artifacts / 'status.json').write_text(json.dumps({'state': 'error', 'error': '429 rate limit; retry after 1s'}))
     sys.exit(1)
 (artifacts / 'final.md').write_text('codex retry success\\n')
 (artifacts / 'status.json').write_text(json.dumps({'state': 'completed', 'artifact_dir': str(artifacts)}))
@@ -212,8 +205,8 @@ import json, sys
 from pathlib import Path
 artifacts = Path(sys.argv[sys.argv.index('--artifacts') + 1])
 artifacts.mkdir(parents=True, exist_ok=True)
-(artifacts / 'events.jsonl').write_text('{\"type\":\"thread.started\"}\\n')
-(artifacts / 'status.json').write_text(json.dumps({'state': 'error', 'error': '503 service unavailable after event'}))
+(artifacts / 'events.jsonl').write_text('{"type":"thread.started"}\\n')
+(artifacts / 'status.json').write_text(json.dumps({'state': 'error', 'error': '429 rate limit after event'}))
 sys.exit(1)
 """
     )
@@ -227,36 +220,3 @@ sys.exit(1)
 
     with pytest.raises(CodexRunnerError, match='Transient Codex/OpenAI provider error after 1 attempt'):
         asyncio.run(run_codex_task(job_id='job-events-fail', prompt='do not retry'))
-
-
-def test_run_codex_task_does_not_retry_429_without_output(tmp_path: Path, monkeypatch) -> None:
-    async def fake_sleep(_seconds: float) -> None:
-        return None
-
-    state_file = tmp_path / 'attempt-state.txt'
-    fake_script = tmp_path / 'fake_codex_rate_limit.py'
-    fake_script.write_text(
-        """#!/usr/bin/env python3
-import json, sys
-from pathlib import Path
-state_file = Path(sys.argv[sys.argv.index('--repo') + 1]).parent / 'attempt-state.txt'
-artifacts = Path(sys.argv[sys.argv.index('--artifacts') + 1])
-artifacts.mkdir(parents=True, exist_ok=True)
-attempt = int(state_file.read_text()) + 1 if state_file.exists() else 1
-state_file.write_text(str(attempt))
-(artifacts / 'status.json').write_text(json.dumps({'state': 'error', 'error': '429 rate limit; retry after 30s'}))
-sys.exit(1)
-"""
-    )
-    fake_script.chmod(fake_script.stat().st_mode | stat.S_IXUSR)
-    monkeypatch.setenv('TAILCHAT_CODEX_BACKGROUND_SCRIPT', str(fake_script))
-    monkeypatch.setenv('TAILCHAT_CODEX_ARTIFACTS_DIR', str(tmp_path / 'artifacts-root'))
-    monkeypatch.setenv('HERMES_TAILCHAT_REPO', str(tmp_path / 'repo'))
-    monkeypatch.setenv('TAILCHAT_CODEX_TRANSIENT_RETRY_ATTEMPTS', '3')
-    monkeypatch.setattr('app.codex_runner.asyncio.sleep', fake_sleep)
-    (tmp_path / 'repo').mkdir()
-
-    with pytest.raises(CodexRunnerError, match='Transient Codex/OpenAI provider error after 1 attempt'):
-        asyncio.run(run_codex_task(job_id='job-rate-limit', prompt='do not retry 429'))
-
-    assert state_file.read_text() == '1'

@@ -155,18 +155,16 @@ python3 scripts/traceability_report.py main..HEAD
 
 - `scripts/ship-pr.sh` — PR creation / auto-merge helper
 - `scripts/traceability_report.py` — report bead/commit linkage and bead state transitions
-- `scripts/review_requirements.py` — classify a slice as trivial/non-trivial and decide whether sidecar review is required
 - `br` / `bv` — backlog and dependency graph tooling
 
 ## When closing work
 
-1. Run `scripts/review_requirements.py` on the staged slice if the change may be non-trivial, and make sure any required sidecar review bead is identified before committing.
-2. Update bead status only after the slice has the required evidence.
-3. `br sync --flush-only`
-4. Commit with bead references.
-5. Record the exact tests/validation run.
-6. Push branch.
-7. Open/update PR.
-8. If the slice is non-trivial, make sure sidecar review disposition is recorded before treating it as done.
+1. Update bead status only after the slice has the required evidence.
+2. `br sync --flush-only`
+3. Commit with bead references.
+4. Record the exact tests/validation run.
+5. Push branch.
+6. Open/update PR.
+7. If the slice is non-trivial, make sure sidecar review disposition is recorded before treating it as done.
 
 If the work changes policy, workflow, or release behavior, make sure the docs are updated in the same branch.

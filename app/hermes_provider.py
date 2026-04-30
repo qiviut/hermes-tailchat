@@ -26,9 +26,6 @@ from tools.approval import (
     set_current_session_key,
     unregister_gateway_notify,
 )
-from agent.rate_limit_tracker import format_rate_limit_compact
-
-from .retry_policy import can_auto_retry_error, is_transient_error, parse_retry_after_seconds
 
 
 EventHandler = Callable[[dict[str, Any]], Awaitable[None]]
@@ -39,11 +36,49 @@ class HermesProviderError(RuntimeError):
 
 
 def _is_transient_error(error_text: str | None) -> bool:
-    return is_transient_error(error_text)
+    if not error_text:
+        return False
+    lowered = error_text.lower()
+    needles = (
+        'rate limit',
+        'rate_limit',
+        'too many requests',
+        'timeout',
+        'timed out',
+        'temporarily unavailable',
+        'temporary failure',
+        'connection reset',
+        'connection aborted',
+        'connection refused',
+        'connection error',
+        'quota',
+        'overloaded',
+        'try again',
+        '503',
+        '429',
+    )
+    return any(needle in lowered for needle in needles)
 
 
 def _parse_retry_after_seconds(error_text: str | None) -> int | None:
-    return parse_retry_after_seconds(error_text)
+    if not error_text:
+        return None
+    import re
+    patterns = (
+        r'retry after\s*(\d+)\s*s',
+        r'retry in\s*(\d+)\s*s',
+        r'after\s*(\d+)\s*seconds',
+        r'please try again in\s*(\d+)\s*s',
+    )
+    lowered = error_text.lower()
+    for pattern in patterns:
+        match = re.search(pattern, lowered)
+        if match:
+            try:
+                return max(1, int(match.group(1)))
+            except (TypeError, ValueError):
+                return None
+    return None
 
 
 class LocalHermesProvider:
@@ -52,7 +87,6 @@ class LocalHermesProvider:
         self._pending_by_approval_id: dict[str, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
         self._session_locks: dict[str, asyncio.Lock] = {}
-        self._rate_limit_snapshot: dict[str, Any] = {'available': False, 'provider': None, 'compact': None}
 
     async def rehydrate_pending_approvals(self, approvals: list[dict[str, Any]]) -> None:
         rebuilt: dict[str, dict[str, Any]] = {}
@@ -79,46 +113,6 @@ class LocalHermesProvider:
                 lock = asyncio.Lock()
                 self._session_locks[session_id] = lock
             return lock
-
-    def _store_rate_limit_snapshot(self, agent: AIAgent) -> None:
-        try:
-            state = agent.get_rate_limit_state()
-            if not state or not getattr(state, 'has_data', False):
-                self._rate_limit_snapshot = {'available': False, 'provider': getattr(agent, 'provider', None), 'compact': None}
-                return
-
-            def _bucket(bucket: Any) -> dict[str, Any]:
-                return {
-                    'limit': getattr(bucket, 'limit', 0),
-                    'remaining': getattr(bucket, 'remaining', 0),
-                    'reset_seconds': getattr(bucket, 'remaining_seconds_now', 0),
-                }
-
-            self._rate_limit_snapshot = {
-                'available': True,
-                'provider': getattr(state, 'provider', None) or getattr(agent, 'provider', None),
-                'captured_at': getattr(state, 'captured_at', None),
-                'compact': format_rate_limit_compact(state),
-                'buckets': {
-                    'requests_min': _bucket(state.requests_min),
-                    'requests_hour': _bucket(state.requests_hour),
-                    'tokens_min': _bucket(state.tokens_min),
-                    'tokens_hour': _bucket(state.tokens_hour),
-                },
-            }
-        except Exception:
-            self._rate_limit_snapshot = {'available': False, 'provider': getattr(agent, 'provider', None), 'compact': None}
-
-    def get_rate_limit_snapshot(self) -> dict[str, Any]:
-        snapshot = dict(self._rate_limit_snapshot)
-        if snapshot.get('available'):
-            snapshot.setdefault('provider', snapshot.get('provider'))
-            return snapshot
-        return {
-            'available': False,
-            'provider': snapshot.get('provider'),
-            'compact': None,
-        }
 
     def _create_agent(self, session_id: str, stream_delta_callback=None, tool_progress_callback=None) -> AIAgent:
         runtime_kwargs = _resolve_runtime_agent_kwargs()
@@ -185,7 +179,6 @@ class LocalHermesProvider:
                 try:
                     return agent.run_conversation(user_message, conversation_history=conversation_history, task_id=session_id)
                 finally:
-                    self._store_rate_limit_snapshot(agent)
                     unregister_gateway_notify(session_id)
                     reset_current_session_key(token)
 
@@ -200,7 +193,7 @@ class LocalHermesProvider:
                     result = None
 
                 safe_to_retry = not side_effect_risk and not has_blocking_approval(session_id)
-                if error_text and attempt < max_attempts and can_auto_retry_error(error_text) and safe_to_retry:
+                if error_text and attempt < max_attempts and _is_transient_error(error_text) and safe_to_retry:
                     retry_after = _parse_retry_after_seconds(error_text)
                     backoff_seconds = retry_after or min(20, 2 ** (attempt - 1))
                     await on_event({

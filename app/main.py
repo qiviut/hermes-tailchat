@@ -18,7 +18,6 @@ from .codex_runner import CodexRunnerError, run_codex_task
 from .config import APP_TITLE, DB_PATH
 from .hermes_provider import HermesProviderError, LocalHermesProvider
 from .store import RESTART_INTERRUPTED_ERROR, Store
-from .retry_policy import is_rate_limited_error, is_transient_error
 import app.store as store_module
 
 
@@ -179,16 +178,34 @@ async def sync_attached_transcript(conversation_id: str) -> dict:
     return conversation
 
 def _is_transient_provider_error(error_text: str | None) -> bool:
-    return is_transient_error(error_text)
-
+    if not error_text:
+        return False
+    lowered = error_text.lower()
+    needles = (
+        'rate limit',
+        'rate_limit',
+        'too many requests',
+        '429',
+        'retry after',
+        'temporarily unavailable',
+        'temporary failure',
+        'overloaded',
+        'timeout',
+        'timed out',
+        'connection reset',
+        'connection aborted',
+        'connection error',
+        'try again',
+        'quota',
+        '503',
+        '529',
+    )
+    return any(needle in lowered for needle in needles)
 
 
 def _format_provider_error(error_text: str, *, prefix: str) -> str:
     if _is_transient_provider_error(error_text):
-        retry_note = 'Tailchat already retries only safe pre-side-effect non-429 transient failures automatically.'
-        if is_rate_limited_error(error_text):
-            retry_note = 'Tailchat does not auto-retry 429/rate-limit failures because they usually need a longer cool-down than an in-turn retry can provide.'
-        return f'[{prefix} transient provider error] {error_text}\n\n{retry_note} If this happened after tools or streaming had started, the run stopped to avoid duplicating side effects. Please retry once the provider recovers.'
+        return f'[{prefix} transient provider error] {error_text}\n\nTailchat already retries safe pre-side-effect cases automatically. If this happened after tools or streaming had started, the run stopped to avoid duplicating side effects. Please retry once the provider recovers.'
     return f'[{prefix}] {error_text}'
 
 
@@ -423,11 +440,6 @@ async def health():
         'session_linkage_mode': 'session-aware-abstraction-layer',
         'startup_recovery_summary': startup_recovery_summary,
     }
-
-
-@app.get('/api/provider/rate-limit')
-async def provider_rate_limit_status():
-    return hermes.get_rate_limit_snapshot()
 
 
 @app.get('/api/conversations')

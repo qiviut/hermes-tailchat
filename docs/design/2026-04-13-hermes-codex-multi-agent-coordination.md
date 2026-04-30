@@ -239,10 +239,6 @@ Every coordination message should have:
 - a concise structured body
 - a stable message envelope with sender, recipients, related bead IDs, and schema version
 
-The canonical executable contract for this section lives in:
-- `docs/specs/multi-agent-message-contract.md`
-- `docs/specs/multi-agent-message-fixtures.json`
-
 ### Worker-to-worker subjects
 - `[start][bead-id]`
 - `[handoff][bead-id]`

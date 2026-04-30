@@ -152,11 +152,9 @@ Codex job behavior:
 - stores the final assistant-style summary in the conversation transcript
 - uses Agent Mail bootstrap / reservation / notification hooks when `am` is available
 - automatically retries transient provider failures only before any Codex events or final output are produced, to avoid duplicating repo side effects
-- does **not** auto-retry 429/rate-limit failures, because those usually need a longer cool-down than an in-turn retry can provide
 
 Hermes foreground-turn behavior:
-- automatically retries safe pre-side-effect transient failures such as 503/timeout-style provider errors
-- does **not** auto-retry 429/rate-limit failures
+- automatically retries transient provider failures only while the turn is still pre-side-effect
 - if a retry happens after text-only partial streaming, Tailchat resets the partial assistant output and restarts cleanly
 - if tools or approval state were already involved, Tailchat stops and surfaces a transient-provider explanation instead of retrying dangerously
 
@@ -297,48 +295,6 @@ Useful commands:
 python3 scripts/swyx_to_skills.py --manual-json tests/fixtures/swyx/manual-items.json --dry-run
 PATH="$HOME/go/bin:$HOME/.local/bin:$PATH" python3 scripts/swyx_to_skills.py --x-query 'from:swyx' --x-limit 5 --dry-run
 python3 scripts/swyx_to_skills.py --manual-json local-items.json --spool-root data/swyx --reduce
-```
-
-## Deterministic Hermes dreaming toolkit
-
-This repo also includes a deterministic foundation for Hermes "dreaming":
-
-- `scripts/hermes_dream.py` — exports Hermes sessions, skips when chat has been idle, writes structured summaries, reflection windows, AI-review candidates, and overlay reports
-- `scripts/hermes_overlay_report.py` — exports a local Hermes overlay report plus patch series / working-tree diffs for safer local maintenance than stash/unstash
-- `scripts/render_hermes_motd.py` — renders a compact SSH/MOTD summary from the latest dream artifacts
-- `scripts/install-hermes-dream.sh` — installs an hourly user-level systemd timer
-- `scripts/install-hermes-motd.sh` — installs the MOTD renderer under `/etc/update-motd.d/`
-
-Artifacts live under:
-- `~/.local/state/hermes-tailchat/dreaming/latest-summary.json`
-- `~/.local/state/hermes-tailchat/dreaming/windows.json`
-- `~/.local/state/hermes-tailchat/dreaming/analysis-candidates.json`
-- `~/.local/state/hermes-tailchat/dreaming/overlay-report.json`
-- `~/.local/state/hermes-tailchat/dreaming/overlay/patches/`
-- `~/.local/state/hermes-tailchat/dreaming/runs.jsonl`
-
-The collector separates skill activity from memory activity, captures transcript windows around `skill_view`, `skill_manage`, `memory`, and `session_search` usage, and ranks the smallest useful window/session bundles for later AI analysis so tokens can go to judgment-heavy review instead of deterministic transcript slicing.
-
-Install the hourly collector:
-
-```bash
-scripts/install-hermes-dream.sh
-```
-
-Install the Hermes MOTD:
-
-```bash
-scripts/install-hermes-motd.sh
-```
-
-Useful commands:
-
-```bash
-systemctl --user status hermes-tailchat-dream.timer
-systemctl --user start hermes-tailchat-dream.service
-python3 scripts/hermes_dream.py
-python3 scripts/hermes_overlay_report.py
-python3 scripts/render_hermes_motd.py
 ```
 
 Useful commands:
