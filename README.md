@@ -73,6 +73,32 @@ Environment variables used by the app:
 - `HERMES_API_KEY`
 - `TAILCHAT_DB_PATH` default: `./tailchat.db`
 
+## X account monitoring
+
+The X monitor is a local operator tool for watching high-value accounts such as `swyx` and feeding their posts through the untrusted-ingestion boundary before any agent-skill extraction.
+
+Security model:
+- X API payloads, including metadata, are hostile input.
+- Raw responses are spooled under ignored `data/x/raw/` and are not sent directly to privileged agents.
+- Normalized artifacts are written under `data/x/normalized/` using `app.untrusted_ingest` with `source_type=x`.
+- `xurl` credentials live outside git, currently under `~/.config/hermes/secrets/x-api/`.
+- The monitor creates a temporary private `.xurl` config for each run rather than committing or printing secrets.
+
+Example commands:
+
+```bash
+python3 scripts/x_monitor.py smoke --handle swyx
+python3 scripts/x_monitor.py check-config --watchlist config/x-watchlist.example.json
+python3 scripts/x_monitor.py poll --watchlist config/x-watchlist.example.json --account swyx
+python3 scripts/x_monitor.py report-costs --ledger data/x/usage.jsonl --billing config/x-billing-plan.example.json
+python3 scripts/swyx_to_skills.py --manual-json tests/fixtures/swyx/manual-items.json --reduce
+python3 scripts/swyx_to_skills.py --candidate-json path/to/candidates.json --spool-root data/swyx
+```
+
+`--candidate-json` accepts one candidate object, a list of candidates, or an object with a `candidates` list matching `docs/specs/swyx-skill-candidate.schema.json`. Drafts are written only to the ignored review queue under `data/swyx/drafts/`; they are not installed into `~/.hermes/skills/` or repo `skills/`.
+
+Before relying on cost forecasts, copy `config/x-billing-plan.example.json` to a local operator config and fill it from the current X Developer Portal billing/package screen. Do not hardcode public pricing claims into code; X plan limits and included reads change.
+
 Example local env file:
 
 ```bash
@@ -214,6 +240,62 @@ That installs a user-level path unit which watches:
 - `%h/.openclaw/workspace/hermes-tailchat/.git/refs/heads/main`
 
 When local `main` advances, systemd runs `scripts/deploy-local.sh` automatically.
+
+## Untrusted ingestion foundation
+
+This repo now includes a deterministic first-pass ingestion toolkit for hostile or semi-hostile content such as websites, email, Discord, X, logs, source code, scripts, pipeline configs, and git metadata.
+
+Artifacts shipped in this slice:
+- `app/untrusted_ingest.py` — deterministic reducers and normalized artifact generation
+- `scripts/untrusted_ingest.py` — CLI for `text`, `json`, and `git` inspection
+- `app/codex_sanitizer.py` — isolated Codex sanitizer worker for normalized artifacts
+- `scripts/untrusted_codex_sanitize.py` — CLI that runs deterministic reduction first and then a Codex sanitizer pass
+- `config/untrusted_ingest/pipelines/*.json` — versioned source profiles and redaction/budget rules
+- `docs/specs/untrusted-ingestion-*.schema.json` — record/config schemas
+- `docs/specs/untrusted-sanitizer-output.schema.json` — schema-bound low-privilege Codex sanitizer result
+- `docs/design/2026-04-21-untrusted-ingestion-foundation.md` — trust-boundary rationale
+
+The intent is to reduce and sanitize hostile input before any higher-authority agent or model sees it. The default pattern is deterministic reduction first, then a low-privilege sanitizer model if semantic classification is needed, and only then escalation to stronger consumers.
+
+The default model-backed sanitizer path uses Codex as an isolated worker with:
+- `--sandbox read-only`
+- `--skip-git-repo-check`
+- `--ephemeral`
+- `--ignore-user-config`
+- a minimal environment allowlist carrying only Codex/OpenAI auth and basic process/runtime variables
+- explicit `--model` selection so high-volume filtering can stay on a cheaper model tier
+
+Useful commands:
+
+```bash
+python3 scripts/untrusted_ingest.py text --source-type email --source-ref message:123 < suspicious.txt
+python3 scripts/untrusted_ingest.py json --source-type x --source-ref tweet:123 --file payload.json
+python3 scripts/untrusted_ingest.py git --repo . --revision HEAD
+python3 scripts/untrusted_codex_sanitize.py --model gpt-5-mini text --source-type email --source-ref message:123 < suspicious.txt
+python3 scripts/untrusted_codex_sanitize.py --model gpt-5-mini git --repo . --revision HEAD
+```
+
+## Swyx-to-agent-skills ingestion slice
+
+This repo includes an initial deterministic-first pipeline for collecting swyx-related source items and turning them into reviewed skill-candidate artifacts without auto-installing external-content-derived instructions.
+
+Artifacts shipped in this slice:
+- `app/swyx_ingest/spool.py` — stable content hashes, deterministic spool paths, and atomic JSON writes
+- `app/swyx_ingest/sources.py` — source item models, manual JSON import, xurl JSON parsing, and a safe xurl auth capability check
+- `app/swyx_ingest/extract.py` — routes source items through `app.untrusted_ingest` before downstream consumption
+- `app/swyx_ingest/skill_draft.py` — validates candidate observations and renders review-required `SKILL.md` drafts
+- `scripts/swyx_to_skills.py` — CLI for dry-run/manual import and bounded xurl query ingestion
+- `docs/specs/swyx-skill-candidate.schema.json` — candidate observation contract
+
+Raw and normalized run artifacts go under ignored `data/swyx/` by default. Candidate drafts are review artifacts only; nothing is promoted into Hermes skills without an explicit later promotion step.
+
+Useful commands:
+
+```bash
+python3 scripts/swyx_to_skills.py --manual-json tests/fixtures/swyx/manual-items.json --dry-run
+PATH="$HOME/go/bin:$HOME/.local/bin:$PATH" python3 scripts/swyx_to_skills.py --x-query 'from:swyx' --x-limit 5 --dry-run
+python3 scripts/swyx_to_skills.py --manual-json local-items.json --spool-root data/swyx --reduce
+```
 
 Useful commands:
 

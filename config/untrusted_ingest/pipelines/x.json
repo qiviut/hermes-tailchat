@@ -1,0 +1,10 @@
+{
+  "source_type": "x",
+  "aliases": ["twitter"],
+  "field_allowlist": ["author", "timestamp", "text", "urls", "conversation_id", "media"],
+  "max_lines": 120,
+  "max_chars": 6000,
+  "detect_commands": true,
+  "detect_secret_patterns": true,
+  "notes": ["x_api_payloads_are_untrusted"]
+}

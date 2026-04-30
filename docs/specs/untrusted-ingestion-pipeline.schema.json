@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/hermes-tailchat/untrusted-ingestion-pipeline.schema.json",
+  "title": "Untrusted ingestion pipeline config",
+  "type": "object",
+  "required": ["source_type", "field_allowlist", "max_lines", "max_chars", "detect_commands", "detect_secret_patterns"],
+  "properties": {
+    "source_type": {"type": "string"},
+    "aliases": {"type": "array", "items": {"type": "string"}},
+    "field_allowlist": {"type": "array", "items": {"type": "string"}},
+    "max_lines": {"type": "integer", "minimum": 1},
+    "max_chars": {"type": "integer", "minimum": 1},
+    "detect_commands": {"type": "boolean"},
+    "detect_secret_patterns": {"type": "boolean"},
+    "regex_redactions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["pattern"],
+        "properties": {
+          "pattern": {"type": "string"},
+          "replacement": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "high_risk_if_paths_match": {"type": "array", "items": {"type": "string"}},
+    "git": {
+      "type": "object",
+      "properties": {
+        "max_diff_bytes": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "notes": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}

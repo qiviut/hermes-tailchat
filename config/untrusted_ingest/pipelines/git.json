@@ -1,0 +1,14 @@
+{
+  "source_type": "git",
+  "aliases": ["commit", "diff", "history"],
+  "field_allowlist": ["commit_sha", "author_name", "author_email", "authored_at", "subject", "body", "changed_paths", "diff", "text"],
+  "max_lines": 320,
+  "max_chars": 16000,
+  "detect_commands": true,
+  "detect_secret_patterns": true,
+  "high_risk_if_paths_match": [".github/workflows", "scripts/", "systemd/", "app/", "config/"],
+  "git": {
+    "max_diff_bytes": 12000
+  },
+  "notes": ["git_message_and_diff_are_untrusted"]
+}

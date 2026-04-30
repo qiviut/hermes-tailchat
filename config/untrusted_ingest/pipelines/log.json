@@ -1,0 +1,13 @@
+{
+  "source_type": "log",
+  "aliases": ["logs"],
+  "field_allowlist": ["path", "component", "text"],
+  "max_lines": 300,
+  "max_chars": 14000,
+  "detect_commands": true,
+  "detect_secret_patterns": true,
+  "regex_redactions": [
+    {"pattern": "(?m)^[A-Za-z0-9+/]{80,}={0,2}$", "replacement": "[blob elided]"}
+  ],
+  "notes": ["logs_are_untrusted_text"]
+}
