@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from app.swyx_ingest.extract import reduce_item, spool_raw_item, spool_reduced_item
-from app.swyx_ingest.skill_draft import CandidateValidationError, render_skill_draft, validate_candidate
+from app.swyx_ingest.skill_draft import CandidateValidationError, load_candidate_json, render_skill_draft, validate_candidate
 from app.swyx_ingest.sources import SourceItem, load_manual_json, parse_xurl_items
 from app.swyx_ingest.spool import content_hash, spool_path, write_json_atomic
 
@@ -143,6 +143,117 @@ def test_candidate_validation_rejects_non_string_workflow_steps() -> None:
     candidate["workflow_steps"] = [{"not": "a string"}]
     with pytest.raises(CandidateValidationError, match="workflow_steps"):
         validate_candidate(candidate)
+
+
+def test_load_candidate_json_accepts_candidates_wrapper(tmp_path: Path) -> None:
+    path = tmp_path / "candidates.json"
+    path.write_text(json.dumps({"candidates": [VALID_CANDIDATE]}))
+    assert load_candidate_json(path) == [VALID_CANDIDATE]
+
+
+def test_cli_candidate_json_writes_review_draft(tmp_path: Path) -> None:
+    candidates = tmp_path / "candidates.json"
+    candidates.write_text(json.dumps({"candidates": [VALID_CANDIDATE]}))
+    spool = tmp_path / "spool"
+    cp = subprocess.run(
+        [sys.executable, "scripts/swyx_to_skills.py", "--candidate-json", str(candidates), "--spool-root", str(spool)],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    output = json.loads(cp.stdout)
+    assert output["candidate_count"] == 1
+    assert len(output["draft_paths"]) == 1
+    draft = Path(output["draft_paths"][0])
+    assert draft == spool / "drafts" / "deterministic-skill-drafting.md"
+    assert "status: draft-review-required" in draft.read_text()
+    assert not (Path.home() / ".hermes" / "skills" / "deterministic-skill-drafting").exists()
+
+
+def test_cli_candidate_json_dry_run_does_not_write_drafts(tmp_path: Path) -> None:
+    candidates = tmp_path / "candidates.json"
+    candidates.write_text(json.dumps(VALID_CANDIDATE))
+    spool = tmp_path / "spool"
+    cp = subprocess.run(
+        [sys.executable, "scripts/swyx_to_skills.py", "--candidate-json", str(candidates), "--spool-root", str(spool), "--dry-run"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    output = json.loads(cp.stdout)
+    assert output["candidate_count"] == 1
+    assert output["draft_paths"] == []
+    assert not spool.exists()
+
+
+def test_cli_candidate_json_rejects_invalid_candidate(tmp_path: Path) -> None:
+    candidates = tmp_path / "bad-candidates.json"
+    bad = dict(VALID_CANDIDATE)
+    bad.pop("source_refs")
+    candidates.write_text(json.dumps(bad))
+    cp = subprocess.run(
+        [sys.executable, "scripts/swyx_to_skills.py", "--candidate-json", str(candidates)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert cp.returncode != 0
+    assert "invalid candidate JSON" in cp.stderr
+    assert "source_refs" in cp.stderr
+
+
+def test_candidate_validation_rejects_schema_extra_fields() -> None:
+    candidate = dict(VALID_CANDIDATE)
+    candidate["extra"] = "not allowed"
+    with pytest.raises(CandidateValidationError, match="unsupported fields"):
+        validate_candidate(candidate)
+
+
+def test_candidate_validation_rejects_overlong_schema_fields() -> None:
+    candidate = dict(VALID_CANDIDATE)
+    candidate["claim"] = "x" * 501
+    with pytest.raises(CandidateValidationError, match="claim"):
+        validate_candidate(candidate)
+
+
+def test_candidate_validation_rejects_non_string_confidence() -> None:
+    candidate = dict(VALID_CANDIDATE)
+    candidate["confidence"] = []
+    with pytest.raises(CandidateValidationError, match="confidence"):
+        validate_candidate(candidate)
+
+
+def test_cli_candidate_json_rejects_malformed_json_without_traceback(tmp_path: Path) -> None:
+    candidates = tmp_path / "malformed.json"
+    candidates.write_text("{")
+    cp = subprocess.run(
+        [sys.executable, "scripts/swyx_to_skills.py", "--candidate-json", str(candidates)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert cp.returncode != 0
+    assert "invalid candidate JSON" in cp.stderr
+    assert "Traceback" not in cp.stderr
+
+
+def test_cli_candidate_json_rejects_duplicate_draft_names(tmp_path: Path) -> None:
+    candidates = tmp_path / "duplicate-candidates.json"
+    first = dict(VALID_CANDIDATE)
+    second = dict(VALID_CANDIDATE)
+    second["source_refs"] = ["x:456"]
+    candidates.write_text(json.dumps([first, second]))
+    cp = subprocess.run(
+        [sys.executable, "scripts/swyx_to_skills.py", "--candidate-json", str(candidates), "--spool-root", str(tmp_path / "spool")],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert cp.returncode != 0
+    assert "duplicate proposed skill names" in cp.stderr
+    assert not (tmp_path / "spool" / "drafts" / "deterministic-skill-drafting.md").exists()
 
 
 def test_cli_manual_json_dry_run_does_not_write(tmp_path: Path) -> None:
