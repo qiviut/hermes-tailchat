@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.swyx_ingest.extract import spool_raw_item, spool_reduced_item
+from app.swyx_ingest.skill_draft import CandidateValidationError, load_candidate_json, write_skill_drafts
 from app.swyx_ingest.sources import fetch_x_query, load_manual_json, parse_xurl_items
 
 
@@ -23,6 +24,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Ingest swyx source items into a deterministic review spool.")
     parser.add_argument("--spool-root", default="data/swyx", help="Directory for raw/normalized/candidate artifacts")
     parser.add_argument("--manual-json", help="Local JSON file with SourceItem-like objects")
+    parser.add_argument("--candidate-json", help="Local JSON file with one or more validated skill candidates to render as review drafts")
     parser.add_argument("--x-query", help="Bounded xurl search query, e.g. 'from:swyx'")
     parser.add_argument("--x-limit", type=int, default=10, help="xurl result limit, 1-100")
     parser.add_argument("--reduce", action="store_true", help="Also write normalized untrusted-ingest artifacts")
@@ -32,27 +34,40 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--x-limit must be between 1 and 100")
 
     items = []
+    candidates = []
     if args.manual_json:
         items.extend(load_manual_json(args.manual_json))
+    if args.candidate_json:
+        try:
+            candidates.extend(load_candidate_json(args.candidate_json))
+        except (CandidateValidationError, json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+            parser.error(f"invalid candidate JSON: {exc}")
     if args.x_query:
         payload = fetch_x_query(args.x_query, limit=args.x_limit)
         items.extend(parse_xurl_items(payload, query=args.x_query))
-    if not items:
-        parser.error("provide --manual-json or --x-query")
+    if not items and not candidates:
+        parser.error("provide --manual-json, --candidate-json, or --x-query")
 
     raw_paths: list[str] = []
     normalized_paths: list[str] = []
+    draft_paths: list[str] = []
     if not args.dry_run:
-        for item in items:
-            raw_paths.append(str(spool_raw_item(args.spool_root, item)))
-            if args.reduce:
-                _, path = spool_reduced_item(args.spool_root, item)
-                normalized_paths.append(str(path))
+        try:
+            for item in items:
+                raw_paths.append(str(spool_raw_item(args.spool_root, item)))
+                if args.reduce:
+                    _, path = spool_reduced_item(args.spool_root, item)
+                    normalized_paths.append(str(path))
+            draft_paths = [str(path) for path in write_skill_drafts(args.spool_root, candidates)]
+        except CandidateValidationError as exc:
+            parser.error(str(exc))
 
     print(json.dumps({
         "items": [_summarize_item(item) for item in items],
+        "candidate_count": len(candidates),
         "raw_paths": raw_paths,
         "normalized_paths": normalized_paths,
+        "draft_paths": draft_paths,
         "dry_run": args.dry_run,
     }, indent=2, sort_keys=True))
     return 0

@@ -22,5 +22,5 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["app", "app.x_monitor"]
+packages = ["app", "app.x_monitor", "app.swyx_ingest"]
 include-package-data = true

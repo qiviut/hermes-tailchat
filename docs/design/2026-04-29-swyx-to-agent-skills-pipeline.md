@@ -26,7 +26,7 @@ This slice intentionally ships the local deterministic core before broad live fe
 - manual JSON import for curated/offline items
 - xurl JSON parsing and bounded `--x-query` dry-run support
 - reducer wiring to the existing untrusted-ingestion toolkit
-- review-required SKILL.md draft rendering
+- review-required SKILL.md draft rendering and CLI review-queue writes from candidate JSON
 
 ## Operator notes
 

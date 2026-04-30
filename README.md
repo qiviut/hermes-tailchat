@@ -91,7 +91,11 @@ python3 scripts/x_monitor.py smoke --handle swyx
 python3 scripts/x_monitor.py check-config --watchlist config/x-watchlist.example.json
 python3 scripts/x_monitor.py poll --watchlist config/x-watchlist.example.json --account swyx
 python3 scripts/x_monitor.py report-costs --ledger data/x/usage.jsonl --billing config/x-billing-plan.example.json
+python3 scripts/swyx_to_skills.py --manual-json tests/fixtures/swyx/manual-items.json --reduce
+python3 scripts/swyx_to_skills.py --candidate-json path/to/candidates.json --spool-root data/swyx
 ```
+
+`--candidate-json` accepts one candidate object, a list of candidates, or an object with a `candidates` list matching `docs/specs/swyx-skill-candidate.schema.json`. Drafts are written only to the ignored review queue under `data/swyx/drafts/`; they are not installed into `~/.hermes/skills/` or repo `skills/`.
 
 Before relying on cost forecasts, copy `config/x-billing-plan.example.json` to a local operator config and fill it from the current X Developer Portal billing/package screen. Do not hardcode public pricing claims into code; X plan limits and included reads change.
 

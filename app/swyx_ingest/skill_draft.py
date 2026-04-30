@@ -18,6 +18,8 @@ _REQUIRED = {
     "confidence",
     "proposed_skill_name",
 }
+_ALLOWED = _REQUIRED
+_ALLOWED_EVIDENCE = {"source_ref", "quote", "timestamp", "url"}
 
 
 class CandidateValidationError(ValueError):
@@ -28,30 +30,46 @@ def validate_candidate(candidate: dict[str, Any]) -> None:
     missing = sorted(_REQUIRED - set(candidate))
     if missing:
         raise CandidateValidationError(f"candidate missing required fields: {', '.join(missing)}")
-    _require_string(candidate, "claim")
-    _require_string(candidate, "skill_trigger")
+    extra = sorted(set(candidate) - _ALLOWED)
+    if extra:
+        raise CandidateValidationError(f"candidate has unsupported fields: {', '.join(extra)}")
+    _require_string(candidate, "claim", max_length=500)
+    _require_string(candidate, "skill_trigger", max_length=500)
     _require_string(candidate, "proposed_skill_name")
     if not isinstance(candidate["source_refs"], list) or not candidate["source_refs"] or not all(isinstance(value, str) and value.strip() for value in candidate["source_refs"]):
         raise CandidateValidationError("source_refs must be a non-empty list of strings")
-    if candidate["confidence"] not in _VALID_CONFIDENCE:
+    confidence = candidate["confidence"]
+    if not isinstance(confidence, str) or confidence not in _VALID_CONFIDENCE:
         raise CandidateValidationError("confidence must be low, medium, or high")
     if not _NAME_RE.match(str(candidate["proposed_skill_name"])):
         raise CandidateValidationError("proposed_skill_name must be lowercase-hyphen style")
-    if not isinstance(candidate["workflow_steps"], list) or not candidate["workflow_steps"] or not all(isinstance(value, str) and value.strip() for value in candidate["workflow_steps"]):
-        raise CandidateValidationError("workflow_steps must be a non-empty list of strings")
-    for field in ("tooling", "risk_notes"):
-        if not isinstance(candidate[field], list) or not all(isinstance(value, str) and value.strip() for value in candidate[field]):
-            raise CandidateValidationError(f"{field} must be a list of strings")
+    if not isinstance(candidate["workflow_steps"], list) or not candidate["workflow_steps"] or not all(isinstance(value, str) and 0 < len(value.strip()) <= 500 for value in candidate["workflow_steps"]):
+        raise CandidateValidationError("workflow_steps must be a non-empty list of strings up to 500 chars")
+    for field, max_length in (("tooling", 120), ("risk_notes", 300)):
+        if not isinstance(candidate[field], list) or not all(isinstance(value, str) and 0 < len(value.strip()) <= max_length for value in candidate[field]):
+            raise CandidateValidationError(f"{field} must be a list of strings up to {max_length} chars")
     if not isinstance(candidate["evidence"], list) or not candidate["evidence"]:
         raise CandidateValidationError("evidence must be a non-empty list")
     for item in candidate["evidence"]:
-        if not isinstance(item, dict) or not isinstance(item.get("source_ref"), str) or not isinstance(item.get("quote"), str) or not item.get("quote", "").strip():
-            raise CandidateValidationError("evidence entries must include source_ref and quote strings")
+        if not isinstance(item, dict):
+            raise CandidateValidationError("evidence entries must be objects")
+        extra_evidence = sorted(set(item) - _ALLOWED_EVIDENCE)
+        if extra_evidence:
+            raise CandidateValidationError(f"evidence entry has unsupported fields: {', '.join(extra_evidence)}")
+        if not isinstance(item.get("source_ref"), str) or not item["source_ref"].strip():
+            raise CandidateValidationError("evidence source_ref must be a non-empty string")
+        if not isinstance(item.get("quote"), str) or not item["quote"].strip() or len(item["quote"].strip()) > 1000:
+            raise CandidateValidationError("evidence quote must be a non-empty string up to 1000 chars")
+        for optional in ("timestamp", "url"):
+            if optional in item and not isinstance(item[optional], str):
+                raise CandidateValidationError(f"evidence {optional} must be a string")
 
 
-def _require_string(candidate: dict[str, Any], field: str) -> None:
+def _require_string(candidate: dict[str, Any], field: str, *, max_length: int | None = None) -> None:
     if not isinstance(candidate[field], str) or not candidate[field].strip():
         raise CandidateValidationError(f"{field} must be a non-empty string")
+    if max_length is not None and len(candidate[field].strip()) > max_length:
+        raise CandidateValidationError(f"{field} must be at most {max_length} chars")
 
 
 def safe_text(value: Any, *, max_chars: int = 500) -> str:
@@ -119,9 +137,39 @@ def render_skill_draft(candidate: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def load_candidate_json(path: str | Path) -> list[dict[str, Any]]:
+    payload = json.loads(Path(path).read_text())
+    if isinstance(payload, dict) and "candidates" in payload:
+        payload = payload["candidates"]
+    elif isinstance(payload, dict):
+        payload = [payload]
+    if not isinstance(payload, list):
+        raise CandidateValidationError("candidate JSON must be an object, a list, or an object with a candidates list")
+    candidates: list[dict[str, Any]] = []
+    for candidate in payload:
+        if not isinstance(candidate, dict):
+            raise CandidateValidationError("each candidate must be an object")
+        validate_candidate(candidate)
+        candidates.append(candidate)
+    return candidates
+
+
 def write_skill_draft(root: str | Path, candidate: dict[str, Any]) -> Path:
     name = sanitize_skill_name(str(candidate.get("proposed_skill_name", "swyx-candidate-skill")))
     path = Path(root) / "drafts" / f"{name}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_skill_draft(candidate))
     return path
+
+
+def write_skill_drafts(root: str | Path, candidates: list[dict[str, Any]]) -> list[Path]:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for candidate in candidates:
+        name = sanitize_skill_name(str(candidate.get("proposed_skill_name", "swyx-candidate-skill")))
+        if name in seen:
+            duplicates.add(name)
+        seen.add(name)
+    if duplicates:
+        raise CandidateValidationError(f"duplicate proposed skill names: {', '.join(sorted(duplicates))}")
+    return [write_skill_draft(root, candidate) for candidate in candidates]
