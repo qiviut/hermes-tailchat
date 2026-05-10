@@ -55,7 +55,7 @@ Important project docs:
 Do not commit real secrets.
 
 Safe patterns:
-- keep `HERMES_API_KEY` outside git in the environment or a host-local env file
+- keep `HERMES_API_KEY` and `OPENAI_API_KEY` outside git in the environment or a host-local env file
 - keep `tailchat.db` local only
 - keep systemd service files with real secrets outside the repo, or use `EnvironmentFile=` pointing at an ignored file
 
@@ -71,7 +71,24 @@ Ignored by git already:
 Environment variables used by the app:
 - `HERMES_API_BASE_URL` default: `http://127.0.0.1:8642`
 - `HERMES_API_KEY`
+- `OPENAI_API_KEY` for Realtime voice client-secret minting (falls back to `HERMES_API_KEY` only for existing single-key deployments)
 - `TAILCHAT_DB_PATH` default: `./tailchat.db`
+
+## Realtime voice chat
+
+Tailchat includes a **Realtime voice** panel in the chat sidebar. It uses browser WebRTC microphone/audio, asks the Tailchat backend for a short-lived OpenAI Realtime client secret, and connects to OpenAI with model `gpt-realtime-2` and the `marin` voice. The browser never receives the long-lived `OPENAI_API_KEY`.
+
+Server setup:
+
+```bash
+export OPENAI_API_KEY=***
+uvicorn app.main:app --host 127.0.0.1 --port 8766 --reload
+```
+
+Browser notes:
+- microphone capture requires a secure context (`https://` or localhost); tailnet HTTPS is recommended for remote devices
+- each voice session is scoped to the currently open Tailchat conversation and stops automatically when switching conversations
+- if `OPENAI_API_KEY` is missing, `POST /api/realtime/client-secret` returns HTTP 503 instead of exposing credentials to the browser
 
 ## X account monitoring
 

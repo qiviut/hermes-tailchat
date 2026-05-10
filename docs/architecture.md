@@ -18,7 +18,8 @@ Use a Python FastAPI backend with PostgreSQL, Redis, and a small React/Next.js f
 - Event fanout/cache: Redis
 - Job runner: ARQ or Dramatiq (favor ARQ for asyncio/Python simplicity)
 - Frontend: Next.js/React + TypeScript
-- Realtime transport: SSE first, WebSocket only if/when bidirectional live typing or richer state sync becomes necessary
+- Realtime transport: SSE for Tailchat transcript/job updates; OpenAI Realtime WebRTC for optional live voice sessions
+- Voice transport: backend-minted OpenAI Realtime ephemeral client secrets; browser microphone/audio connects directly to `gpt-realtime-2` over WebRTC and never sees the long-lived server API key
 - Reverse access:
   - simplest: bind backend/frontend to localhost and expose with `tailscale serve`
   - alternative: bind directly to tailnet IP and firewall to `tailscale0`

@@ -172,6 +172,86 @@ def test_conversation_routes_work_through_root_and_hermes_prefix(tmp_path: Path)
         assert messages.json() == []
 
 
+def test_realtime_client_secret_requires_existing_conversation(tmp_path: Path):
+    app, _db_path = load_app(tmp_path)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/realtime/client-secret",
+            json={"conversation_id": "missing-conversation", "voice": "marin"},
+        )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "conversation not found"
+
+
+def test_realtime_client_secret_requires_openai_api_key(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("HERMES_API_KEY", "")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    app, _db_path = load_app(tmp_path)
+
+    with TestClient(app) as client:
+        created = client.post("/api/conversations", json={"title": "voice convo"})
+        response = client.post(
+            "/api/realtime/client-secret",
+            json={"conversation_id": created.json()["id"], "voice": "marin"},
+        )
+
+    assert response.status_code == 503
+    assert "OPENAI_API_KEY" in response.json()["detail"]
+
+
+def test_realtime_client_secret_calls_openai_with_ephemeral_session_config(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    app, _db_path = load_app(tmp_path)
+    import app.main as main
+
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        content = b'{"value":"ek_test","expires_at":123}'
+
+        def json(self):
+            return {"value": "ek_test", "expires_at": 123}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, *, headers, json):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr(main.httpx, "AsyncClient", FakeAsyncClient)
+
+    with TestClient(app) as client:
+        created = client.post("/api/conversations", json={"title": "voice convo"})
+        convo_id = created.json()["id"]
+        response = client.post(
+            "/api/realtime/client-secret",
+            json={"conversation_id": convo_id, "voice": "marin"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["value"] == "ek_test"
+    assert response.json()["model"] == "gpt-realtime-2"
+    assert captured["url"] == "https://api.openai.com/v1/realtime/client_secrets"
+    assert captured["headers"]["Authorization"] == "Bearer test-openai-key"
+    assert captured["headers"]["OpenAI-Safety-Identifier"].startswith("tailchat-conversation-")
+    assert convo_id not in captured["headers"]["OpenAI-Safety-Identifier"]
+    assert captured["json"]["session"]["type"] == "realtime"
+    assert captured["json"]["session"]["model"] == "gpt-realtime-2"
+    assert captured["json"]["session"]["audio"]["output"]["voice"] == "marin"
+
 
 def test_job_creation_works_through_hermes_prefix(tmp_path: Path):
     app, _db_path = load_app(tmp_path)

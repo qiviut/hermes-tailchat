@@ -298,6 +298,23 @@
       border: 1px solid #ea580c;
       font-size: 14px;
     }
+    .voice-panel {
+      display: grid;
+      gap: 8px;
+      padding: 10px;
+      border: 1px solid #374151;
+      border-radius: 10px;
+      background: #0b1220;
+    }
+    .voice-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .voice-actions button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
 
     @media (max-width: 900px) {
       .wrap {
@@ -413,6 +430,16 @@
       </div>
       <div id="chatList" style="margin-top: 16px"></div>
       <div class="section">
+        <div class="meta">Realtime voice</div>
+        <div class="voice-panel">
+          <div id="voiceStatus" class="meta">Disconnected. Uses OpenAI Realtime model gpt-realtime-2.</div>
+          <div class="voice-actions">
+            <button id="voiceStart" class="secondary">Start voice</button>
+            <button id="voiceStop" class="secondary" disabled>Stop</button>
+          </div>
+        </div>
+      </div>
+      <div class="section">
         <div class="meta">Background jobs</div>
         <div id="jobs"></div>
       </div>
@@ -487,11 +514,15 @@ const attachListEl = document.getElementById('attachList');
 const attachStatusEl = document.getElementById('attachStatus');
 const attachTitleOverrideEl = document.getElementById('attachTitleOverride');
 const backgroundExecutorEl = document.getElementById('backgroundExecutor');
+const voiceStatusEl = document.getElementById('voiceStatus');
+const voiceStartEl = document.getElementById('voiceStart');
+const voiceStopEl = document.getElementById('voiceStop');
 let attachableSessions = [];
 let selectedAttachSessionId = null;
 let currentPendingApproval = null;
 let approvalModalDismissed = false;
 let toolEventGroups = new Map();
+let voiceSession = null;
 const inspectableEventNames = new Set([
   'job.queued',
   'job.started',
@@ -1013,6 +1044,7 @@ function openEventStream(id) {
 }
 
 async function openChat(id) {
+  if (voiceSession) stopVoiceChat();
   currentChat = id;
   lastEventId = null;
   clearReconnectTimer();
@@ -1059,12 +1091,139 @@ async function sendMessage(background = false) {
   }
 }
 
+function setVoiceStatus(text) {
+  voiceStatusEl.textContent = text;
+}
+
+function cleanupVoiceSession() {
+  if (!voiceSession) return;
+  const session = voiceSession;
+  voiceSession = null;
+  if (session.peerConnection) session.peerConnection.onconnectionstatechange = null;
+  if (session.dataChannel) session.dataChannel.close();
+  if (session.peerConnection) session.peerConnection.close();
+  if (session.mediaStream) {
+    for (const track of session.mediaStream.getTracks()) track.stop();
+  }
+  if (session.audioElement) session.audioElement.remove();
+  voiceStartEl.disabled = false;
+  voiceStopEl.disabled = true;
+}
+
+function realtimeClientSecretValue(payload) {
+  return payload?.value || payload?.client_secret?.value || payload?.clientSecret?.value || null;
+}
+
+async function startVoiceChat() {
+  if (voiceSession) return;
+  if (!currentChat) await newChat();
+  if (!navigator.mediaDevices?.getUserMedia || !window.RTCPeerConnection) {
+    setVoiceStatus('This browser does not support WebRTC microphone voice chat.');
+    return;
+  }
+  voiceStartEl.disabled = true;
+  voiceStopEl.disabled = false;
+  setVoiceStatus('Requesting microphone…');
+
+  let mediaStream;
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({audio: true});
+    const secretResponse = await fetch(apiUrl('/api/realtime/client-secret'), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({conversation_id: currentChat, voice: 'marin'}),
+    });
+    const secretPayload = await secretResponse.json().catch(() => ({}));
+    if (!secretResponse.ok) {
+      throw new Error(secretPayload.detail || 'Failed to create OpenAI Realtime client secret');
+    }
+    const ephemeralKey = realtimeClientSecretValue(secretPayload);
+    if (!ephemeralKey) throw new Error('Realtime client secret response did not include a usable value');
+
+    const peerConnection = new RTCPeerConnection();
+    const audioElement = document.createElement('audio');
+    audioElement.autoplay = true;
+    audioElement.style.display = 'none';
+    document.body.appendChild(audioElement);
+    const dataChannel = peerConnection.createDataChannel('oai-events');
+    voiceSession = {peerConnection, dataChannel, mediaStream, audioElement};
+    peerConnection.ontrack = (event) => {
+      audioElement.srcObject = event.streams[0];
+    };
+    peerConnection.onconnectionstatechange = () => {
+      if (['failed', 'disconnected', 'closed'].includes(peerConnection.connectionState)) {
+        stopVoiceChat();
+      }
+    };
+    for (const track of mediaStream.getAudioTracks()) {
+      peerConnection.addTrack(track, mediaStream);
+    }
+
+    dataChannel.addEventListener('open', () => {
+      dataChannel.send(JSON.stringify({
+        type: 'session.update',
+        session: {
+          type: 'realtime',
+          model: 'gpt-realtime-2',
+          output_modalities: ['audio', 'text'],
+          audio: {
+            input: {turn_detection: {type: 'semantic_vad'}},
+            output: {voice: 'marin'},
+          },
+          instructions: 'You are Hermes Tailchat in a live voice session. Speak clearly and briefly. Ask before taking actions outside conversation.',
+        },
+      }));
+      setVoiceStatus('Voice connected. Speak naturally; semantic VAD handles turn taking.');
+    });
+    dataChannel.addEventListener('message', (event) => {
+      let payload;
+      try {
+        payload = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (payload.type === 'error') setVoiceStatus(payload.error?.message || 'Realtime voice error');
+      if (payload.type === 'response.done') setVoiceStatus('Voice connected. Response complete.');
+      if (payload.type === 'input_audio_buffer.speech_started') setVoiceStatus('Listening…');
+      if (payload.type === 'input_audio_buffer.speech_stopped') setVoiceStatus('Thinking…');
+    });
+
+    const offer = await peerConnection.createOffer();
+    await peerConnection.setLocalDescription(offer);
+    const sdpResponse = await fetch('https://api.openai.com/v1/realtime/calls', {
+      method: 'POST',
+      body: offer.sdp,
+      headers: {
+        'Authorization': `Bearer ${ephemeralKey}`,
+        'Content-Type': 'application/sdp',
+      },
+    });
+    if (!sdpResponse.ok) throw new Error(await sdpResponse.text());
+    await peerConnection.setRemoteDescription({type: 'answer', sdp: await sdpResponse.text()});
+
+    setVoiceStatus('Connecting voice session…');
+  } catch (error) {
+    if (mediaStream) {
+      for (const track of mediaStream.getTracks()) track.stop();
+    }
+    cleanupVoiceSession();
+    setVoiceStatus(`Voice failed: ${error.message || error}`);
+  }
+}
+
+function stopVoiceChat() {
+  cleanupVoiceSession();
+  setVoiceStatus('Voice disconnected. Uses OpenAI Realtime model gpt-realtime-2.');
+}
+
 document.getElementById('newChat').onclick = newChat;
 document.getElementById('attachChat').onclick = openAttachPanel;
 document.getElementById('confirmAttach').onclick = confirmAttach;
 document.getElementById('cancelAttach').onclick = closeAttachPanel;
 document.getElementById('send').onclick = () => sendMessage(false);
 document.getElementById('background').onclick = () => sendMessage(true);
+voiceStartEl.onclick = startVoiceChat;
+voiceStopEl.onclick = stopVoiceChat;
 approvalApproveEl.onclick = () => currentPendingApproval && resolveApproval(currentPendingApproval.id, 'approved');
 approvalDenyEl.onclick = () => currentPendingApproval && resolveApproval(currentPendingApproval.id, 'denied');
 approvalDismissEl.onclick = () => {

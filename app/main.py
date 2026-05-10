@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import socket
 import time
@@ -10,12 +11,13 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+import httpx
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from .broker import broker
 from .codex_runner import CodexRunnerError, run_codex_task
-from .config import APP_TITLE, DB_PATH
+from .config import APP_TITLE, DB_PATH, OPENAI_API_KEY
 from .hermes_provider import HermesProviderError, LocalHermesProvider
 from .store import RESTART_INTERRUPTED_ERROR, Store
 from .retry_policy import is_rate_limited_error, is_transient_error
@@ -37,6 +39,11 @@ class ConversationAttach(BaseModel):
 
 class MessageCreate(BaseModel):
     content: str
+
+
+class RealtimeClientSecretCreate(BaseModel):
+    conversation_id: str = Field(min_length=1)
+    voice: str = Field(default='marin', pattern='^[a-zA-Z0-9_-]+$')
 
 
 class JobCreate(BaseModel):
@@ -79,6 +86,7 @@ poll_task: asyncio.Task | None = None
 startup_recovery_summary: dict[str, int] = {'runs': 0, 'jobs': 0, 'approvals': 0, 'messages': 0}
 active_run_tasks: dict[str, asyncio.Task] = {}
 active_job_tasks: dict[str, asyncio.Task] = {}
+REALTIME_MODEL = 'gpt-realtime-2'
 
 
 @asynccontextmanager
@@ -161,6 +169,30 @@ def _curated_importable_messages(session_id: str, hermes_messages: list[dict[str
             'metadata': {'origin': 'hermes_import', 'hermes_message_id': message.get('id')},
         })
     return imported, max_timestamp
+
+
+def _realtime_safety_identifier(conversation_id: str) -> str:
+    digest = hashlib.sha256(conversation_id.encode('utf-8')).hexdigest()
+    return f'tailchat-conversation-{digest}'
+
+
+def _build_realtime_session_config(voice: str) -> dict:
+    return {
+        'session': {
+            'type': 'realtime',
+            'model': REALTIME_MODEL,
+            'output_modalities': ['audio', 'text'],
+            'audio': {
+                'input': {
+                    'turn_detection': {'type': 'semantic_vad'},
+                },
+                'output': {
+                    'voice': voice,
+                },
+            },
+            'instructions': 'You are Hermes Tailchat in a live voice session. Speak clearly and briefly. Ask before taking actions outside conversation.',
+        }
+    }
 
 
 async def sync_attached_transcript(conversation_id: str) -> dict:
@@ -428,6 +460,36 @@ async def health():
 @app.get('/api/provider/rate-limit')
 async def provider_rate_limit_status():
     return hermes.get_rate_limit_snapshot()
+
+
+@app.post('/api/realtime/client-secret')
+async def create_realtime_client_secret(body: RealtimeClientSecretCreate):
+    if not store.conversation_exists(body.conversation_id):
+        raise HTTPException(status_code=404, detail='conversation not found')
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=503, detail='OPENAI_API_KEY is not configured on the Tailchat server')
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=10.0)) as client:
+            response = await client.post(
+                'https://api.openai.com/v1/realtime/client_secrets',
+                headers={
+                    'Authorization': f'Bearer {OPENAI_API_KEY}',
+                    'Content-Type': 'application/json',
+                    'OpenAI-Safety-Identifier': _realtime_safety_identifier(body.conversation_id),
+                },
+                json=_build_realtime_session_config(body.voice),
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f'OpenAI Realtime client secret request failed: {exc}') from exc
+
+    payload = response.json() if response.content else {}
+    if response.status_code >= 400:
+        detail = payload.get('error', {}).get('message') if isinstance(payload, dict) else None
+        raise HTTPException(status_code=response.status_code, detail=detail or 'OpenAI Realtime client secret request failed')
+    if isinstance(payload, dict):
+        payload.setdefault('model', REALTIME_MODEL)
+    return payload
 
 
 @app.get('/api/conversations')
