@@ -71,7 +71,7 @@ Ignored by git already:
 Environment variables used by the app:
 - `HERMES_API_BASE_URL` default: `http://127.0.0.1:8642`
 - `HERMES_API_KEY`
-- `OPENAI_API_KEY` for Realtime voice client-secret minting (falls back to `HERMES_API_KEY` only for existing single-key deployments)
+- `OPENAI_API_KEY` for Realtime voice client-secret minting; this must be a real OpenAI key and intentionally does not fall back to `HERMES_API_KEY`
 - `TAILCHAT_DB_PATH` default: `./tailchat.db`
 
 ## Realtime voice chat

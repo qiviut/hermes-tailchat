@@ -201,6 +201,22 @@ def test_realtime_client_secret_requires_openai_api_key(tmp_path: Path, monkeypa
     assert "OPENAI_API_KEY" in response.json()["detail"]
 
 
+def test_realtime_client_secret_does_not_use_hermes_api_key_as_openai_key(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("HERMES_API_KEY", "hermes-only-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    app, _db_path = load_app(tmp_path)
+
+    with TestClient(app) as client:
+        created = client.post("/api/conversations", json={"title": "voice convo"})
+        response = client.post(
+            "/api/realtime/client-secret",
+            json={"conversation_id": created.json()["id"], "voice": "marin"},
+        )
+
+    assert response.status_code == 503
+    assert "OPENAI_API_KEY" in response.json()["detail"]
+
+
 def test_realtime_client_secret_calls_openai_with_ephemeral_session_config(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
     app, _db_path = load_app(tmp_path)
