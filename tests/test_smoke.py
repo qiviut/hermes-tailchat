@@ -263,10 +263,41 @@ def test_realtime_client_secret_calls_openai_with_ephemeral_session_config(tmp_p
     assert captured["url"] == "https://api.openai.com/v1/realtime/client_secrets"
     assert captured["headers"]["Authorization"] == "Bearer test-openai-key"
     assert captured["headers"]["OpenAI-Safety-Identifier"].startswith("tailchat-conversation-")
+    assert len(captured["headers"]["OpenAI-Safety-Identifier"]) <= 64
     assert convo_id not in captured["headers"]["OpenAI-Safety-Identifier"]
     assert captured["json"]["session"]["type"] == "realtime"
     assert captured["json"]["session"]["model"] == "gpt-realtime-2"
+    assert captured["json"]["session"]["output_modalities"] == ["audio"]
     assert captured["json"]["session"]["audio"]["output"]["voice"] == "marin"
+
+
+def test_realtime_diagnostics_are_persisted_and_redacted(tmp_path: Path):
+    app, _db_path = load_app(tmp_path)
+
+    with TestClient(app) as client:
+        created = client.post("/api/conversations", json={"title": "voice diagnostics"})
+        convo_id = created.json()["id"]
+        response = client.post(
+            "/api/realtime/diagnostics",
+            json={
+                "conversation_id": convo_id,
+                "phase": "sdp.response",
+                "level": "info",
+                "event_type": "response.done",
+                "data": {"status": 200, "ephemeralKey": "ek_should_not_persist", "nested": {"Authorization": "Bearer sk-test"}},
+            },
+        )
+        history = client.get(f"/api/conversations/{convo_id}/events/history?limit=5")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    events = history.json()
+    assert events[-1]["event_type"] == "realtime.diagnostic"
+    payload = events[-1]["payload"]
+    assert payload["phase"] == "sdp.response"
+    assert payload["event_type"] == "response.done"
+    assert payload["data"]["ephemeralKey"] == "[redacted]"
+    assert payload["data"]["nested"]["Authorization"] == "[redacted]"
 
 
 def test_job_creation_works_through_hermes_prefix(tmp_path: Path):

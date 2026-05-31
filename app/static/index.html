@@ -1095,6 +1095,27 @@ function setVoiceStatus(text) {
   voiceStatusEl.textContent = text;
 }
 
+function logRealtimeDiagnostic(phase, data = {}, level = 'info', detail = null) {
+  if (!currentChat) return;
+  const eventType = typeof data?.type === 'string' ? data.type : null;
+  const safeData = {...data};
+  delete safeData.sdp;
+  delete safeData.ephemeralKey;
+  delete safeData.authorization;
+  fetch(apiUrl('/api/realtime/diagnostics'), {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      conversation_id: currentChat,
+      phase,
+      level,
+      detail: detail ? String(detail).slice(0, 500) : null,
+      event_type: eventType,
+      data: safeData,
+    }),
+  }).catch(() => {});
+}
+
 function cleanupVoiceSession() {
   if (!voiceSession) return;
   const session = voiceSession;
@@ -1128,6 +1149,7 @@ async function startVoiceChat() {
   let mediaStream;
   try {
     mediaStream = await navigator.mediaDevices.getUserMedia({audio: true});
+    logRealtimeDiagnostic('getUserMedia.ok', {audio_tracks: mediaStream.getAudioTracks().length});
     const secretResponse = await fetch(apiUrl('/api/realtime/client-secret'), {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
@@ -1135,8 +1157,10 @@ async function startVoiceChat() {
     });
     const secretPayload = await secretResponse.json().catch(() => ({}));
     if (!secretResponse.ok) {
+      logRealtimeDiagnostic('client_secret.failed', {status: secretResponse.status}, 'error', secretPayload.detail || 'secret request failed');
       throw new Error(secretPayload.detail || 'Failed to create OpenAI Realtime client secret');
     }
+    logRealtimeDiagnostic('client_secret.ok', {status: secretResponse.status, model: secretPayload.model, expires_at: secretPayload.expires_at});
     const ephemeralKey = realtimeClientSecretValue(secretPayload);
     if (!ephemeralKey) throw new Error('Realtime client secret response did not include a usable value');
 
@@ -1148,9 +1172,11 @@ async function startVoiceChat() {
     const dataChannel = peerConnection.createDataChannel('oai-events');
     voiceSession = {peerConnection, dataChannel, mediaStream, audioElement};
     peerConnection.ontrack = (event) => {
+      logRealtimeDiagnostic('peer.ontrack', {streams: event.streams.length, track_kind: event.track?.kind});
       audioElement.srcObject = event.streams[0];
     };
     peerConnection.onconnectionstatechange = () => {
+      logRealtimeDiagnostic('peer.connection_state', {connectionState: peerConnection.connectionState, iceConnectionState: peerConnection.iceConnectionState});
       if (['failed', 'disconnected', 'closed'].includes(peerConnection.connectionState)) {
         stopVoiceChat();
       }
@@ -1160,12 +1186,13 @@ async function startVoiceChat() {
     }
 
     dataChannel.addEventListener('open', () => {
+      logRealtimeDiagnostic('data_channel.open');
       dataChannel.send(JSON.stringify({
         type: 'session.update',
         session: {
           type: 'realtime',
           model: 'gpt-realtime-2',
-          output_modalities: ['audio', 'text'],
+          output_modalities: ['audio'],
           audio: {
             input: {turn_detection: {type: 'semantic_vad'}},
             output: {voice: 'marin'},
@@ -1182,11 +1209,25 @@ async function startVoiceChat() {
       } catch {
         return;
       }
-      if (payload.type === 'error') setVoiceStatus(payload.error?.message || 'Realtime voice error');
-      if (payload.type === 'response.done') setVoiceStatus('Voice connected. Response complete.');
-      if (payload.type === 'input_audio_buffer.speech_started') setVoiceStatus('Listening…');
-      if (payload.type === 'input_audio_buffer.speech_stopped') setVoiceStatus('Thinking…');
+      if (payload.type === 'error') {
+        logRealtimeDiagnostic('data_channel.error_event', payload, 'error', payload.error?.message || 'Realtime voice error');
+        setVoiceStatus(payload.error?.message || 'Realtime voice error');
+      }
+      if (payload.type === 'response.done') {
+        logRealtimeDiagnostic('response.done', {type: payload.type, status: payload.response?.status, status_details: payload.response?.status_details});
+        setVoiceStatus('Voice connected. Response complete.');
+      }
+      if (payload.type === 'input_audio_buffer.speech_started') {
+        logRealtimeDiagnostic('speech.started', {type: payload.type});
+        setVoiceStatus('Listening…');
+      }
+      if (payload.type === 'input_audio_buffer.speech_stopped') {
+        logRealtimeDiagnostic('speech.stopped', {type: payload.type});
+        setVoiceStatus('Thinking…');
+      }
     });
+    dataChannel.addEventListener('close', () => logRealtimeDiagnostic('data_channel.close'));
+    dataChannel.addEventListener('error', () => logRealtimeDiagnostic('data_channel.error', {}, 'error', 'data channel error'));
 
     const offer = await peerConnection.createOffer();
     await peerConnection.setLocalDescription(offer);
@@ -1198,11 +1239,13 @@ async function startVoiceChat() {
         'Content-Type': 'application/sdp',
       },
     });
+    logRealtimeDiagnostic('sdp.response', {status: sdpResponse.status, ok: sdpResponse.ok});
     if (!sdpResponse.ok) throw new Error(await sdpResponse.text());
     await peerConnection.setRemoteDescription({type: 'answer', sdp: await sdpResponse.text()});
 
     setVoiceStatus('Connecting voice session…');
   } catch (error) {
+    logRealtimeDiagnostic('voice.failed', {}, 'error', error.message || error);
     if (mediaStream) {
       for (const track of mediaStream.getTracks()) track.stop();
     }

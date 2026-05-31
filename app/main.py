@@ -46,6 +46,15 @@ class RealtimeClientSecretCreate(BaseModel):
     voice: str = Field(default='marin', pattern='^[a-zA-Z0-9_-]+$')
 
 
+class RealtimeDiagnosticCreate(BaseModel):
+    conversation_id: str = Field(min_length=1)
+    phase: str = Field(min_length=1, max_length=80)
+    level: str = Field(default='info', pattern='^(debug|info|warning|error)$')
+    detail: str | None = Field(default=None, max_length=500)
+    event_type: str | None = Field(default=None, max_length=120)
+    data: dict | None = None
+
+
 class JobCreate(BaseModel):
     prompt: str = Field(min_length=1)
     delay_seconds: int = 0
@@ -172,7 +181,7 @@ def _curated_importable_messages(session_id: str, hermes_messages: list[dict[str
 
 
 def _realtime_safety_identifier(conversation_id: str) -> str:
-    digest = hashlib.sha256(conversation_id.encode('utf-8')).hexdigest()
+    digest = hashlib.sha256(conversation_id.encode('utf-8')).hexdigest()[:32]
     return f'tailchat-conversation-{digest}'
 
 
@@ -181,7 +190,7 @@ def _build_realtime_session_config(voice: str) -> dict:
         'session': {
             'type': 'realtime',
             'model': REALTIME_MODEL,
-            'output_modalities': ['audio', 'text'],
+            'output_modalities': ['audio'],
             'audio': {
                 'input': {
                     'turn_detection': {'type': 'semantic_vad'},
@@ -193,6 +202,27 @@ def _build_realtime_session_config(voice: str) -> dict:
             'instructions': 'You are Hermes Tailchat in a live voice session. Speak clearly and briefly. Ask before taking actions outside conversation.',
         }
     }
+
+
+def _redact_realtime_diagnostic(value):
+    if isinstance(value, str):
+        if value.startswith('ek_') or value.startswith('sk-'):
+            return '[redacted]'
+        if len(value) > 500:
+            return f'{value[:500]}…'
+        return value
+    if isinstance(value, dict):
+        redacted = {}
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if any(secret_key in lowered for secret_key in ('authorization', 'token', 'secret', 'key', 'sdp')):
+                redacted[key] = '[redacted]'
+            else:
+                redacted[key] = _redact_realtime_diagnostic(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_realtime_diagnostic(item) for item in value[:20]]
+    return value
 
 
 async def sync_attached_transcript(conversation_id: str) -> dict:
@@ -490,6 +520,23 @@ async def create_realtime_client_secret(body: RealtimeClientSecretCreate):
     if isinstance(payload, dict):
         payload.setdefault('model', REALTIME_MODEL)
     return payload
+
+
+@app.post('/api/realtime/diagnostics')
+async def create_realtime_diagnostic(body: RealtimeDiagnosticCreate):
+    if not store.conversation_exists(body.conversation_id):
+        raise HTTPException(status_code=404, detail='conversation not found')
+    payload = {
+        'event': 'realtime.diagnostic',
+        'phase': body.phase,
+        'level': body.level,
+        'detail': body.detail,
+        'event_type': body.event_type,
+        'data': _redact_realtime_diagnostic(body.data or {}),
+        'ts': time.time(),
+    }
+    await publish(body.conversation_id, payload)
+    return {'ok': True}
 
 
 @app.get('/api/conversations')
