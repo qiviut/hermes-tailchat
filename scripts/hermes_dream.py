@@ -14,7 +14,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from app.dreaming import build_analysis_candidates, build_dream_report, build_retrieval_index, extract_reflection_windows, filter_recent_sessions
+from app.dreaming import apply_retention_policy, build_analysis_candidates, build_dream_report, build_retrieval_index, extract_reflection_windows, filter_recent_sessions
 from app.overlay import build_overlay_report
 
 
@@ -116,6 +116,7 @@ def main() -> int:
             )
             + '\n'
         )
+    retention = apply_retention_policy(state_dir, report=report)
 
     print(
         json.dumps(
@@ -125,6 +126,9 @@ def main() -> int:
                 'analysis_candidates': str(state_dir / 'analysis-candidates.json'),
                 'retrieval_index': str(state_dir / 'retrieval-index.json'),
                 'overlay_report': str(state_dir / 'overlay-report.json'),
+                'retention_report': str(state_dir / 'retention-report.json'),
+                'history_dir': str(state_dir / 'history'),
+                'snapshot_id': retention.get('snapshot_id'),
                 'windows': len(windows),
             }
         )

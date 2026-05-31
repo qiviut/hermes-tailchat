@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -183,6 +184,8 @@ def build_dream_report(
             'retrieval_index': str(base / 'retrieval-index.json'),
             'overlay_report': str(base / 'overlay-report.json'),
             'runs_log': str(base / 'runs.jsonl'),
+            'retention_report': str(base / 'retention-report.json'),
+            'history_dir': str(base / 'history'),
         }
 
     return {
@@ -255,6 +258,86 @@ def _delta_counts(current: dict[str, Any], previous: dict[str, Any] | None) -> d
         key: int(current_usage.get(key, 0)) - int(previous_usage.get(key, 0))
         for key in keys
     }
+
+
+
+def _snapshot_id(report: dict[str, Any], history_dir: Path) -> str:
+    generated_at = report.get('generated_at')
+    if isinstance(generated_at, str) and generated_at:
+        normalized = generated_at.replace('Z', '+00:00')
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            parsed = None
+        if parsed is not None:
+            return parsed.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    existing_runs = (
+        sorted(path.name for path in history_dir.iterdir() if path.is_dir() and path.name.startswith('run-'))
+        if history_dir.exists()
+        else []
+    )
+    return f'run-{len(existing_runs) + 1:06d}'
+
+
+
+def apply_retention_policy(
+    state_dir: str | Path,
+    *,
+    report: dict[str, Any],
+    max_snapshots: int = 24,
+    max_runs_log_entries: int = 168,
+) -> dict[str, Any]:
+    base = Path(state_dir)
+    history_dir = base / 'history'
+    history_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_id = _snapshot_id(report, history_dir)
+    snapshot_dir = history_dir / snapshot_id
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+    artifact_names = (
+        'latest-summary.json',
+        'windows.json',
+        'analysis-candidates.json',
+        'retrieval-index.json',
+        'overlay-report.json',
+    )
+    copied_files: list[str] = []
+    for artifact_name in artifact_names:
+        source = base / artifact_name
+        if not source.exists():
+            continue
+        shutil.copy2(source, snapshot_dir / artifact_name)
+        copied_files.append(artifact_name)
+
+    deleted_snapshots: list[str] = []
+    snapshots = sorted(path for path in history_dir.iterdir() if path.is_dir())
+    while len(snapshots) > max_snapshots:
+        doomed = snapshots.pop(0)
+        deleted_snapshots.append(doomed.name)
+        shutil.rmtree(doomed)
+
+    runs_log_entries_kept = 0
+    runs_log_path = base / 'runs.jsonl'
+    if runs_log_path.exists():
+        lines = [line for line in runs_log_path.read_text().splitlines() if line.strip()]
+        if len(lines) > max_runs_log_entries:
+            lines = lines[-max_runs_log_entries:]
+            runs_log_path.write_text(''.join(f'{line}\n' for line in lines))
+        runs_log_entries_kept = len(lines)
+
+    summary = {
+        'generated_at': datetime.now(timezone.utc).isoformat(),
+        'snapshot_id': snapshot_id,
+        'snapshot_path': str(snapshot_dir),
+        'copied_files': copied_files,
+        'snapshot_count': len([path for path in history_dir.iterdir() if path.is_dir()]),
+        'deleted_snapshots': deleted_snapshots,
+        'runs_log_entries_kept': runs_log_entries_kept,
+        'max_snapshots': max_snapshots,
+        'max_runs_log_entries': max_runs_log_entries,
+    }
+    (base / 'retention-report.json').write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n')
+    return summary
 
 
 
@@ -666,6 +749,38 @@ def build_retrieval_index(
 
 
 
+def _brief_time(value: object) -> str:
+    if not isinstance(value, str) or not value:
+        return 'unknown'
+    normalized = value.replace('Z', '+00:00')
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return value
+    return parsed.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+
+
+
+def _duration_label(seconds: object) -> str:
+    if not isinstance(seconds, int):
+        return 'unknown'
+    seconds = max(0, seconds)
+    minutes = seconds // 60
+    if minutes < 90:
+        return f'{minutes}m'
+    hours = minutes // 60
+    if hours < 48:
+        return f'{hours}h'
+    return f'{hours // 24}d'
+
+
+
+def _shorten(value: object, limit: int = 48) -> str:
+    text = str(value) if value else 'none'
+    return text if len(text) <= limit else text[: limit - 1] + '…'
+
+
+
 def render_motd(report: dict[str, Any], analysis: dict[str, Any] | None = None) -> str:
     recent = report.get('recent_activity') or {}
     usage = report.get('usage') or {}
@@ -675,50 +790,55 @@ def render_motd(report: dict[str, Any], analysis: dict[str, Any] | None = None) 
     top_skill = 'none'
     if usage.get('top_skills'):
         skill = usage['top_skills'][0]
-        top_skill = f"{skill['name']} ({skill['count']})"
+        top_skill = f"{skill['name']}×{skill['count']}"
 
-    idle_seconds = recent.get('idle_seconds')
-    idle_label = 'unknown'
-    if isinstance(idle_seconds, int):
-        idle_label = f'{max(0, idle_seconds // 60)}m ago'
+    memory_actions = usage.get('memory_actions') or {}
+    memory_delta = sum(int(value) for value in memory_actions.values() if isinstance(value, int))
+    skill_view_calls = int(usage.get('skill_view_calls') or 0)
+    skill_manage_calls = int(usage.get('skill_manage_calls') or 0)
 
-    overlay_label = 'overlay: unavailable'
+    overlay_state = 'UNKNOWN'
+    overlay_detail = 'overlay unavailable'
     if overlay:
-        dirty_label = 'dirty' if overlay.get('dirty') else 'clean'
-        upstream = overlay.get('upstream_ref') or '?'
+        overlay_state = 'DIRTY' if overlay.get('dirty') else 'CLEAN'
         patch_count = overlay.get('exported_patch_count')
-        patch_label = f' patches={patch_count}' if patch_count is not None else ''
-        overlay_label = (
-            f"overlay: {overlay.get('label', 'repo')} {overlay.get('branch', '?')} "
-            f"vs {upstream} +{overlay.get('ahead', 0)}/-{overlay.get('behind', 0)} {dirty_label}{patch_label}"
+        patch_label = f' patches:{patch_count}' if patch_count is not None else ''
+        overlay_detail = (
+            f"{overlay.get('label', 'repo')}:{overlay.get('branch', '?')} "
+            f"+{overlay.get('ahead', 0)}/-{overlay.get('behind', 0)} {overlay_state.lower()}{patch_label}"
         )
 
-    recent_label = recent.get('last_title') or recent.get('last_session_id') or 'none'
-    lines = [
-        'Hermes summary',
-        f"- dream status: {report.get('status', 'unknown')} (last chat {idle_label})",
-        f"- recent session: {recent_label} [{recent.get('last_session_id') or '-'}]",
-        f"- skill activity: view={usage.get('skill_view_calls', 0)} patch={usage.get('skill_manage_calls', 0)}; top skill: {top_skill}",
-        f"- memory activity: calls={usage.get('memory_calls', 0)} actions={json.dumps(usage.get('memory_actions', {}), sort_keys=True)}",
-        f"- {overlay_label}",
-    ]
+    queue_windows = 0
+    queue_sessions = 0
+    focus_items = ['no analysis focus']
     if analysis:
         summary = analysis.get('summary') or {}
-        focus = (summary.get('focus') or ['no analysis focus'])[:2]
-        lines.append(
-            f"- dream queue: windows={summary.get('candidate_window_count', 0)} sessions={summary.get('candidate_session_count', 0)}"
-        )
-        lines.append(f"- focus: {'; '.join(focus)}")
-    if paths:
-        lines.extend(
-            [
-                f"- summary: {paths.get('latest_summary')}",
-                f"- windows: {paths.get('windows')}",
-                f"- analysis: {paths.get('analysis_candidates')}",
-                f"- retrieval index: {paths.get('retrieval_index')}",
-                f"- overlay report: {paths.get('overlay_report')}",
-                f"- dream log: {paths.get('runs_log')}",
-            ]
-        )
-    lines.append('- more: open the JSON artifacts or ask Hermes for a deeper analysis')
+        queue_windows = int(summary.get('candidate_window_count') or 0)
+        queue_sessions = int(summary.get('candidate_session_count') or 0)
+        focus_items = [str(item) for item in (summary.get('focus') or focus_items)[:2]]
+
+    status = str(report.get('status') or 'unknown').upper()
+    posture = 'ACTIVE' if report.get('status') == 'ready' else 'QUIET'
+    idle_label = _duration_label(recent.get('idle_seconds'))
+    recent_label = _shorten(recent.get('last_title') or recent.get('last_session_id'), 42)
+    generated = _brief_time(report.get('generated_at'))
+    state_dir = paths.get('state_dir') or (str(Path(paths['latest_summary']).parent) if paths.get('latest_summary') else 'n/a')
+
+    lines = [
+        '╭─ OPENCLAW COMMAND CENTER ─────────────────────────────────────────╮',
+        f'│ briefing {generated:<24} posture {posture:<6} dream {status:<8} │',
+        f'│ last chat {idle_label:<7} recent {_shorten(recent_label, 37):<37} │',
+        f'│ hermes    overlay {overlay_state:<7} {overlay_detail:<38} │',
+        f'│ queue     windows {queue_windows:<3} sessions {queue_sessions:<3} top skill {top_skill:<16} │',
+        f'│ memory    calls {int(usage.get("memory_calls") or 0):<3} delta {memory_delta:<3} skills view/edit {skill_view_calls}/{skill_manage_calls:<8} │',
+        f'│ focus     {_shorten(focus_items[0], 58):<58} │',
+    ]
+    if len(focus_items) > 1:
+        lines.append(f'│ next      {_shorten(focus_items[1], 58):<58} │')
+    lines.extend(
+        [
+            f'│ bearings  {_shorten(state_dir, 58):<58} │',
+            '╰──────────────────────────────────────────────────────────────────╯',
+        ]
+    )
     return '\n'.join(lines)

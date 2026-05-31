@@ -236,6 +236,7 @@ The repo should continue proving value locally before proposing upstream work.
 
 2. Add retention policy for cold dreaming artifacts
    - especially `runs.jsonl`, windows, and derived bundles over time
+   - status: implemented with bounded `history/<snapshot-id>/` snapshots plus `retention-report.json`; follow-up can tune limits and decide whether additional artifact classes deserve archival
 
 3. Add reviewable decision-record outputs
    - so maintenance recommendations become auditable actions rather than just ranked artifacts

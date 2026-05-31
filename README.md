@@ -305,6 +305,8 @@ Artifacts live under:
 - `~/.local/state/hermes-tailchat/dreaming/windows.json`
 - `~/.local/state/hermes-tailchat/dreaming/analysis-candidates.json`
 - `~/.local/state/hermes-tailchat/dreaming/overlay-report.json`
+- `~/.local/state/hermes-tailchat/dreaming/retention-report.json`
+- `~/.local/state/hermes-tailchat/dreaming/history/`
 - `~/.local/state/hermes-tailchat/dreaming/overlay/patches/`
 - `~/.local/state/hermes-tailchat/dreaming/runs.jsonl`
 

@@ -28,9 +28,11 @@ Artifacts:
 - `windows.json` — transcript windows around skill/memory/session-search events
 - `analysis-candidates.json` — ranked recommendations for AI review scopes (single window vs whole session)
 - `overlay-report.json` — local Hermes overlay status and exported patch metadata
+- `retention-report.json` — machine-readable snapshot/trim summary for cold artifact retention
+- `history/<snapshot-id>/` — bounded historical copies of summary/windows/analysis/retrieval/overlay artifacts
 - `overlay/patches/` — patch series for local overlay commits ahead of upstream
 - `overlay/working-tree.diff` — current uncommitted delta
-- `runs.jsonl` — append-only run history for later analysis
+- `runs.jsonl` — append-only run history for later analysis, trimmed to a bounded line count by the retention policy
 
 These logs are intentionally richer than the first analysis pass needs, so later AI analysis can choose among:
 

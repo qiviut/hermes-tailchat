@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 from app.dreaming import (
+    apply_retention_policy,
     build_analysis_candidates,
     build_dream_report,
     build_retrieval_index,
@@ -281,12 +282,15 @@ def test_render_motd_mentions_report_paths_recent_signals_and_analysis_queue() -
 
     motd = render_motd(report, analysis=analysis)
 
-    assert 'Hermes summary' in motd
-    assert 'top skill: hermes-agent (2)' in motd
-    assert '/tmp/hermes-dream/latest-summary.json' in motd
-    assert '/tmp/hermes-dream/retrieval-index.json' in motd
-    assert 'overlay: hermes-agent main vs origin/main +2/-0 clean patches=2' in motd
-    assert 'dream queue: windows=3 sessions=1' in motd
+    assert 'OPENCLAW COMMAND CENTER' in motd
+    assert 'posture ACTIVE' in motd
+    assert 'top skill hermes-agent×2' in motd
+    assert '/tmp/hermes-dream' in motd
+    assert '/tmp/hermes-dream/latest-summary.json' not in motd
+    assert 'overlay CLEAN' in motd
+    assert 'hermes-agent:main +2/-0 clean patches:2' in motd
+    assert 'windows 3' in motd
+    assert 'sessions 1' in motd
 
 
 
@@ -320,6 +324,53 @@ def test_overlay_report_exports_patch_series_and_diffs(tmp_path: Path) -> None:
     assert 'scratch.txt' in (export_dir / 'working-tree.diff').read_text()
     saved = json.loads((export_dir / 'overlay-report.json').read_text())
     assert saved['ahead'] == 1
+
+
+
+def test_retention_policy_snapshots_current_artifacts_and_trims_runs_log(tmp_path: Path) -> None:
+    state_dir = tmp_path / 'dreaming'
+    state_dir.mkdir()
+    report = {
+        'generated_at': '2026-04-21T18:42:00+00:00',
+        'status': 'ready',
+    }
+    for name, payload in {
+        'latest-summary.json': {'status': 'ready'},
+        'windows.json': [{'window_id': 'w1'}],
+        'analysis-candidates.json': {'summary': {'focus': ['review patched skills']}},
+        'retrieval-index.json': {'modes': {'reflection': {'source_ids': ['reflection-windows']}}},
+        'overlay-report.json': {'available': True},
+    }.items():
+        (state_dir / name).write_text(json.dumps(payload) + '\n')
+    (state_dir / 'runs.jsonl').write_text('one\ntwo\nthree\nfour\n')
+
+    summary = apply_retention_policy(state_dir, report=report, max_snapshots=2, max_runs_log_entries=2)
+
+    snapshot_dir = state_dir / 'history' / '20260421T184200Z'
+    assert snapshot_dir.exists()
+    assert json.loads((snapshot_dir / 'latest-summary.json').read_text())['status'] == 'ready'
+    assert (state_dir / 'runs.jsonl').read_text().splitlines() == ['three', 'four']
+    saved = json.loads((state_dir / 'retention-report.json').read_text())
+    assert saved['snapshot_count'] == 1
+    assert saved['runs_log_entries_kept'] == 2
+    assert summary['snapshot_id'] == '20260421T184200Z'
+
+
+def test_retention_policy_prunes_old_snapshots_and_uses_fallback_snapshot_id(tmp_path: Path) -> None:
+    state_dir = tmp_path / 'dreaming'
+    history_dir = state_dir / 'history'
+    history_dir.mkdir(parents=True)
+    for name in ('20260419T010101Z', '20260420T010101Z'):
+        snapshot = history_dir / name
+        snapshot.mkdir()
+        (snapshot / 'latest-summary.json').write_text('{}\n')
+    (state_dir / 'latest-summary.json').write_text('{"status": "ready"}\n')
+
+    summary = apply_retention_policy(state_dir, report={'status': 'skipped'}, max_snapshots=2, max_runs_log_entries=5)
+
+    remaining = sorted(path.name for path in history_dir.iterdir() if path.is_dir())
+    assert remaining == ['20260420T010101Z', 'run-000001']
+    assert summary['deleted_snapshots'] == ['20260419T010101Z']
 
 
 
