@@ -259,18 +259,25 @@ def test_realtime_client_secret_calls_openai_with_ephemeral_session_config(tmp_p
 
     assert response.status_code == 200
     assert response.json()["value"] == "ek_test"
-    assert response.json()["model"] == "gpt-realtime-whisper"
+    assert response.json()["model"] == "gpt-realtime-2"
     assert captured["url"] == "https://api.openai.com/v1/realtime/client_secrets"
     assert captured["headers"]["Authorization"] == "Bearer test-openai-key"
     assert captured["headers"]["OpenAI-Safety-Identifier"].startswith("tailchat-conversation-")
     assert len(captured["headers"]["OpenAI-Safety-Identifier"]) <= 64
     assert convo_id not in captured["headers"]["OpenAI-Safety-Identifier"]
-    assert captured["json"]["session"]["type"] == "transcription"
-    assert "model" not in captured["json"]["session"]
-    assert "output_modalities" not in captured["json"]["session"]
-    transcription = captured["json"]["session"]["audio"]["input"]["transcription"]
+    session = captured["json"]["session"]
+    assert session["type"] == "realtime"
+    assert session["model"] == "gpt-realtime-2"
+    assert session["output_modalities"] == ["audio"]
+    assert session["audio"]["output"]["voice"] == "marin"
+    transcription = session["audio"]["input"]["transcription"]
     assert transcription["model"] == "gpt-realtime-whisper"
     assert transcription["delay"] == "low"
+    assert session["tool_choice"] == "auto"
+    tool = session["tools"][0]
+    assert tool["type"] == "function"
+    assert tool["name"] == "run_hermes_turn"
+    assert tool["parameters"]["required"] == ["request"]
 
 
 def test_realtime_speech_uses_latest_tts_model_and_hashed_safety_identifier(tmp_path: Path, monkeypatch):
@@ -325,16 +332,20 @@ def test_realtime_speech_uses_latest_tts_model_and_hashed_safety_identifier(tmp_
     assert captured["json"]["input"] == "Hermes says hello"
 
 
-def test_static_voice_bridge_posts_transcripts_to_hermes_and_speaks_completed_runs():
+def test_static_voice_bridge_uses_realtime_tool_call_for_hermes_authority():
     static_html = (Path(__file__).resolve().parents[1] / "app" / "static" / "index.html").read_text()
 
-    assert "conversation.item.input_audio_transcription.completed" in static_html
-    assert "sendVoiceTranscriptToHermes" in static_html
+    assert "response.function_call_arguments.done" in static_html
+    assert "run_hermes_turn" in static_html
+    assert "runHermesToolCall" in static_html
     assert "/api/conversations/${currentChat}/messages" in static_html
-    assert "pendingVoiceRunIds.add(payload.run_id)" in static_html
-    assert "speakHermesResponseWithTts(event.content || '', event.run_id)" in static_html
+    assert "pendingVoiceToolCalls.set(payload.run_id" in static_html
+    assert "conversation.item.create" in static_html
+    assert "function_call_output" in static_html
+    assert "completeHermesToolCall(event.run_id" in static_html
+    assert "gpt-realtime-2" in static_html
     assert "gpt-realtime-whisper" in static_html
-    assert "/api/realtime/speech" in static_html
+    assert "response.create" in static_html
 
 
 def test_realtime_diagnostics_are_persisted_and_redacted(tmp_path: Path):

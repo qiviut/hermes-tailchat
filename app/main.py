@@ -101,6 +101,7 @@ poll_task: asyncio.Task | None = None
 startup_recovery_summary: dict[str, int] = {'runs': 0, 'jobs': 0, 'approvals': 0, 'messages': 0}
 active_run_tasks: dict[str, asyncio.Task] = {}
 active_job_tasks: dict[str, asyncio.Task] = {}
+REALTIME_VOICE_MODEL = 'gpt-realtime-2'
 REALTIME_TRANSCRIPTION_MODEL = 'gpt-realtime-whisper'
 TTS_MODEL = 'gpt-4o-mini-tts'
 
@@ -192,15 +193,44 @@ def _realtime_safety_identifier(conversation_id: str) -> str:
     return f'tailchat-conversation-{digest}'
 
 
-def _build_realtime_session_config(_voice: str) -> dict:
+def _build_realtime_session_config(voice: str) -> dict:
     return {
         'session': {
-            'type': 'transcription',
+            'type': 'realtime',
+            'model': REALTIME_VOICE_MODEL,
+            'instructions': (
+                'You are the live voice interface for Hermes Tailchat. '
+                'Keep turn-taking natural: you may briefly acknowledge the user, say you are checking with Hermes, '
+                'or explain that Hermes is still working. Do not answer substantive user requests from your own knowledge. '
+                'For every substantive user request, call the run_hermes_turn tool with the user request. '
+                'After the tool returns, speak the Hermes output faithfully and do not add unrelated commentary.'
+            ),
             'audio': {
                 'input': {
                     'transcription': {'model': REALTIME_TRANSCRIPTION_MODEL, 'language': 'en', 'delay': 'low'},
                 },
+                'output': {'voice': voice},
             },
+            'output_modalities': ['audio'],
+            'tools': [
+                {
+                    'type': 'function',
+                    'name': 'run_hermes_turn',
+                    'description': 'Submit the user request to Hermes, Tailchat’s authoritative agent, and return the completed Hermes response.',
+                    'parameters': {
+                        'type': 'object',
+                        'properties': {
+                            'request': {
+                                'type': 'string',
+                                'description': 'The user request to send to Hermes. Preserve all important details from the spoken turn.',
+                            },
+                        },
+                        'required': ['request'],
+                        'additionalProperties': False,
+                    },
+                },
+            ],
+            'tool_choice': 'auto',
         }
     }
 
@@ -519,7 +549,7 @@ async def create_realtime_client_secret(body: RealtimeClientSecretCreate):
         detail = payload.get('error', {}).get('message') if isinstance(payload, dict) else None
         raise HTTPException(status_code=response.status_code, detail=detail or 'OpenAI Realtime client secret request failed')
     if isinstance(payload, dict):
-        payload.setdefault('model', REALTIME_TRANSCRIPTION_MODEL)
+        payload.setdefault('model', REALTIME_VOICE_MODEL)
     return payload
 
 

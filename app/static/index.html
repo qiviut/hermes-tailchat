@@ -432,7 +432,7 @@
       <div class="section">
         <div class="meta">Realtime voice</div>
         <div class="voice-panel">
-          <div id="voiceStatus" class="meta">Disconnected. Uses OpenAI realtime transcription plus Hermes plus OpenAI TTS.</div>
+          <div id="voiceStatus" class="meta">Disconnected. Uses OpenAI Realtime voice with Hermes as the authoritative tool.</div>
           <div class="voice-actions">
             <button id="voiceStart" class="secondary">Start voice</button>
             <button id="voiceStop" class="secondary" disabled>Stop</button>
@@ -523,7 +523,7 @@ let currentPendingApproval = null;
 let approvalModalDismissed = false;
 let toolEventGroups = new Map();
 let voiceSession = null;
-let pendingVoiceRunIds = new Set();
+let pendingVoiceToolCalls = new Map();
 const inspectableEventNames = new Set([
   'job.queued',
   'job.started',
@@ -973,18 +973,19 @@ async function applyEvent(event) {
     const el = document.getElementById('msg-' + event.message_id);
     if (el) el.textContent = event.content || '';
     setStatus('idle');
-    if (event.run_id && pendingVoiceRunIds.has(event.run_id)) {
-      pendingVoiceRunIds.delete(event.run_id);
-      if (!await speakHermesResponseWithTts(event.content || '', event.run_id)) {
-        setVoiceStatus('Hermes responded; voice channel is not ready to speak it.');
-      }
+    if (event.run_id && pendingVoiceToolCalls.has(event.run_id)) {
+      completeHermesToolCall(event.run_id, event.content || '');
     }
     await Promise.all([loadJobs(), loadRateLimitMeta()]);
   }
   if (event.event === 'message.error') {
     const el = document.getElementById('msg-' + event.message_id);
     if (el) el.textContent = '[error] ' + event.error;
-    if (event.run_id) pendingVoiceRunIds.delete(event.run_id);
+    if (event.run_id && pendingVoiceToolCalls.has(event.run_id)) {
+      const pending = pendingVoiceToolCalls.get(event.run_id);
+      pendingVoiceToolCalls.delete(event.run_id);
+      sendRealtimeToolOutput(pending.call_id, {status: 'error', error: event.error || 'Hermes run failed'}, 'Tell the user Hermes failed on that request, briefly and without adding your own answer.');
+    }
     setStatus('error');
     setVoiceStatus('Hermes voice turn failed.');
     await Promise.all([loadJobs(), loadRateLimitMeta()]);
@@ -1125,11 +1126,28 @@ function logRealtimeDiagnostic(phase, data = {}, level = 'info', detail = null) 
   }).catch(() => {});
 }
 
-async function sendVoiceTranscriptToHermes(transcript, itemId = null) {
-  const content = String(transcript || '').trim();
-  if (!currentChat || !content) return;
-  setVoiceStatus('Sending voice transcript to Hermes…');
-  logRealtimeDiagnostic('voice.transcript_to_hermes', {item_id: itemId, length: content.length});
+function sendRealtimeToolOutput(callId, output, responseInstructions = null) {
+  const dataChannel = voiceSession?.dataChannel;
+  if (!dataChannel || dataChannel.readyState !== 'open') return false;
+  dataChannel.send(JSON.stringify({
+    type: 'conversation.item.create',
+    item: {
+      type: 'function_call_output',
+      call_id: callId,
+      output: JSON.stringify(output),
+    },
+  }));
+  const response = {type: 'response.create'};
+  if (responseInstructions) response.response = {instructions: responseInstructions};
+  dataChannel.send(JSON.stringify(response));
+  return true;
+}
+
+async function runHermesToolCall(args, callId = null) {
+  const content = String(args?.request || args?.transcript || args?.message || '').trim();
+  if (!currentChat || !content || !callId) return;
+  setVoiceStatus('Asking Hermes…');
+  logRealtimeDiagnostic('voice.hermes_tool_call', {call_id: callId, length: content.length});
   const res = await fetch(apiUrl(`/api/conversations/${currentChat}/messages`), {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -1137,46 +1155,50 @@ async function sendVoiceTranscriptToHermes(transcript, itemId = null) {
   });
   const payload = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const detail = payload.detail?.message || payload.detail || 'failed to send transcript to Hermes';
-    logRealtimeDiagnostic('voice.transcript_to_hermes.failed', {status: res.status}, 'error', detail);
+    const detail = payload.detail?.message || payload.detail || 'failed to send request to Hermes';
+    logRealtimeDiagnostic('voice.hermes_tool_call.failed', {status: res.status, call_id: callId}, 'error', detail);
+    sendRealtimeToolOutput(callId, {status: 'error', error: detail}, 'Tell the user Hermes could not start that request, briefly and without adding your own answer.');
     setVoiceStatus(`Hermes voice send failed: ${detail}`);
     return;
   }
-  if (payload.run_id) pendingVoiceRunIds.add(payload.run_id);
+  if (payload.run_id) pendingVoiceToolCalls.set(payload.run_id, {call_id: callId, request: content});
   setVoiceStatus('Hermes is thinking…');
 }
 
-async function speakHermesResponseWithTts(content, runId = null) {
-  const text = String(content || '').trim();
-  if (!currentChat || !text || !voiceSession?.audioElement) return false;
-  logRealtimeDiagnostic('voice.hermes_response_to_tts', {run_id: runId, length: text.length});
-  const res = await fetch(apiUrl('/api/realtime/speech'), {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({conversation_id: currentChat, content: text, voice: 'marin'}),
-  });
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}));
-    const detail = error.detail || 'speech generation failed';
-    logRealtimeDiagnostic('voice.hermes_response_to_tts.failed', {status: res.status}, 'error', detail);
-    setVoiceStatus(`Hermes speech failed: ${detail}`);
-    return false;
+async function handleRealtimeFunctionCall(callId, name, rawArguments) {
+  if (name !== 'run_hermes_turn' || !callId || voiceSession?.seenToolCallIds?.has(callId)) return;
+  voiceSession?.seenToolCallIds?.add(callId);
+  let args = {};
+  try {
+    args = JSON.parse(rawArguments || '{}');
+  } catch (error) {
+    logRealtimeDiagnostic('voice.hermes_tool_args.invalid', {call_id: callId}, 'error', error.message || error);
+    sendRealtimeToolOutput(callId, {status: 'error', error: 'Invalid Hermes tool arguments'}, 'Tell the user the voice tool call could not be parsed.');
+    return;
   }
-  const audioUrl = URL.createObjectURL(await res.blob());
-  const audioElement = voiceSession.audioElement;
-  if (audioElement.dataset.objectUrl) URL.revokeObjectURL(audioElement.dataset.objectUrl);
-  audioElement.dataset.objectUrl = audioUrl;
-  audioElement.srcObject = null;
-  audioElement.src = audioUrl;
-  await audioElement.play();
-  setVoiceStatus('Speaking Hermes response…');
-  return true;
+  await runHermesToolCall(args, callId);
+}
+
+function completeHermesToolCall(runId, content) {
+  const pending = pendingVoiceToolCalls.get(runId);
+  if (!pending) return false;
+  pendingVoiceToolCalls.delete(runId);
+  const text = String(content || '').trim();
+  const ok = sendRealtimeToolOutput(
+    pending.call_id,
+    {status: 'completed', content: text},
+    'Speak the Hermes result faithfully. Do not add unrelated commentary.'
+  );
+  logRealtimeDiagnostic('voice.hermes_tool_output', {run_id: runId, call_id: pending.call_id, length: text.length, sent: ok});
+  setVoiceStatus(ok ? 'Speaking Hermes response…' : 'Hermes responded; voice channel is not ready to speak it.');
+  return ok;
 }
 
 function cleanupVoiceSession() {
   if (!voiceSession) return;
   const session = voiceSession;
   voiceSession = null;
+  pendingVoiceToolCalls.clear();
   if (session.peerConnection) session.peerConnection.onconnectionstatechange = null;
   if (session.dataChannel) session.dataChannel.close();
   if (session.peerConnection) session.peerConnection.close();
@@ -1230,7 +1252,7 @@ async function startVoiceChat() {
     audioElement.style.display = 'none';
     document.body.appendChild(audioElement);
     const dataChannel = peerConnection.createDataChannel('oai-events');
-    voiceSession = {peerConnection, dataChannel, mediaStream, audioElement, seenTranscriptItemIds: new Set()};
+    voiceSession = {peerConnection, dataChannel, mediaStream, audioElement, seenToolCallIds: new Set()};
     peerConnection.ontrack = (event) => {
       logRealtimeDiagnostic('peer.ontrack', {streams: event.streams.length, track_kind: event.track?.kind});
       audioElement.srcObject = event.streams[0];
@@ -1250,15 +1272,33 @@ async function startVoiceChat() {
       dataChannel.send(JSON.stringify({
         type: 'session.update',
         session: {
-          type: 'transcription',
+          type: 'realtime',
+          model: 'gpt-realtime-2',
+          instructions: 'You are the live voice interface for Hermes Tailchat. You may briefly acknowledge, say you are checking with Hermes, or give wait-state updates. Do not answer substantive user requests yourself. For every substantive request, call run_hermes_turn. After the tool returns, speak the Hermes output faithfully.',
           audio: {
             input: {
               transcription: {model: 'gpt-realtime-whisper', language: 'en', delay: 'low'},
             },
+            output: {voice: 'marin'},
           },
+          output_modalities: ['audio'],
+          tools: [{
+            type: 'function',
+            name: 'run_hermes_turn',
+            description: 'Submit the user request to Hermes, Tailchat’s authoritative agent, and return the completed Hermes response.',
+            parameters: {
+              type: 'object',
+              properties: {
+                request: {type: 'string', description: 'The user request to send to Hermes. Preserve important spoken details.'},
+              },
+              required: ['request'],
+              additionalProperties: false,
+            },
+          }],
+          tool_choice: 'auto',
         },
       }));
-      setVoiceStatus('Voice connected. Speak naturally; semantic VAD handles turn taking.');
+      setVoiceStatus('Voice connected. Realtime can call Hermes as its authoritative tool.');
     });
     dataChannel.addEventListener('message', async (event) => {
       let payload;
@@ -1271,13 +1311,22 @@ async function startVoiceChat() {
         logRealtimeDiagnostic('data_channel.error_event', payload, 'error', payload.error?.message || 'Realtime voice error');
         setVoiceStatus(payload.error?.message || 'Realtime voice error');
       }
+      if (payload.type === 'response.function_call_arguments.done') {
+        await handleRealtimeFunctionCall(
+          payload.call_id || payload.item?.call_id || null,
+          payload.name || payload.item?.name || null,
+          payload.arguments || payload.item?.arguments || '{}'
+        );
+      }
+      if (payload.type === 'response.output_item.done' && payload.item?.type === 'function_call') {
+        await handleRealtimeFunctionCall(
+          payload.item.call_id || null,
+          payload.item.name || null,
+          payload.item.arguments || '{}'
+        );
+      }
       if (payload.type === 'conversation.item.input_audio_transcription.completed') {
-        const transcript = payload.transcript || payload.item?.content?.map(part => part.transcript || part.text || '').join(' ') || '';
-        const itemId = payload.item_id || payload.item?.id || null;
-        if (!itemId || !voiceSession?.seenTranscriptItemIds?.has(itemId)) {
-          if (itemId) voiceSession?.seenTranscriptItemIds?.add(itemId);
-          await sendVoiceTranscriptToHermes(transcript, itemId);
-        }
+        logRealtimeDiagnostic('transcription.completed', {item_id: payload.item_id || payload.item?.id || null, transcript_length: String(payload.transcript || '').length});
       }
       if (payload.type === 'response.done') {
         logRealtimeDiagnostic('response.done', {type: payload.type, status: payload.response?.status, status_details: payload.response?.status_details});
