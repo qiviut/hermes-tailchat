@@ -193,13 +193,14 @@ def _build_realtime_session_config(voice: str) -> dict:
             'output_modalities': ['audio'],
             'audio': {
                 'input': {
-                    'turn_detection': {'type': 'semantic_vad'},
+                    'turn_detection': {'type': 'semantic_vad', 'create_response': False},
+                    'transcription': {'model': 'gpt-4o-mini-transcribe', 'language': 'en'},
                 },
                 'output': {
                     'voice': voice,
                 },
             },
-            'instructions': 'You are Hermes Tailchat in a live voice session. Speak clearly and briefly. Ask before taking actions outside conversation.',
+            'instructions': 'You are Tailchat voice I/O. Transcribe the user and stay silent until Tailchat sends a Hermes response to read aloud.',
         }
     }
 

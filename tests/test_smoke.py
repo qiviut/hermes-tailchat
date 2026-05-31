@@ -268,7 +268,21 @@ def test_realtime_client_secret_calls_openai_with_ephemeral_session_config(tmp_p
     assert captured["json"]["session"]["type"] == "realtime"
     assert captured["json"]["session"]["model"] == "gpt-realtime-2"
     assert captured["json"]["session"]["output_modalities"] == ["audio"]
+    assert captured["json"]["session"]["audio"]["input"]["turn_detection"]["create_response"] is False
+    assert captured["json"]["session"]["audio"]["input"]["transcription"]["model"] == "gpt-4o-mini-transcribe"
     assert captured["json"]["session"]["audio"]["output"]["voice"] == "marin"
+    assert "Transcribe the user" in captured["json"]["session"]["instructions"]
+
+
+def test_static_voice_bridge_posts_transcripts_to_hermes_and_speaks_completed_runs():
+    static_html = (Path(__file__).resolve().parents[1] / "app" / "static" / "index.html").read_text()
+
+    assert "conversation.item.input_audio_transcription.completed" in static_html
+    assert "sendVoiceTranscriptToHermes" in static_html
+    assert "/api/conversations/${currentChat}/messages" in static_html
+    assert "pendingVoiceRunIds.add(payload.run_id)" in static_html
+    assert "speakHermesResponseWithRealtime(event.content || '', event.run_id)" in static_html
+    assert "create_response: false" in static_html
 
 
 def test_realtime_diagnostics_are_persisted_and_redacted(tmp_path: Path):

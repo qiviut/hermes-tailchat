@@ -523,6 +523,7 @@ let currentPendingApproval = null;
 let approvalModalDismissed = false;
 let toolEventGroups = new Map();
 let voiceSession = null;
+let pendingVoiceRunIds = new Set();
 const inspectableEventNames = new Set([
   'job.queued',
   'job.started',
@@ -972,12 +973,20 @@ async function applyEvent(event) {
     const el = document.getElementById('msg-' + event.message_id);
     if (el) el.textContent = event.content || '';
     setStatus('idle');
+    if (event.run_id && pendingVoiceRunIds.has(event.run_id)) {
+      pendingVoiceRunIds.delete(event.run_id);
+      if (!speakHermesResponseWithRealtime(event.content || '', event.run_id)) {
+        setVoiceStatus('Hermes responded; voice channel is not ready to speak it.');
+      }
+    }
     await Promise.all([loadJobs(), loadRateLimitMeta()]);
   }
   if (event.event === 'message.error') {
     const el = document.getElementById('msg-' + event.message_id);
     if (el) el.textContent = '[error] ' + event.error;
+    if (event.run_id) pendingVoiceRunIds.delete(event.run_id);
     setStatus('error');
+    setVoiceStatus('Hermes voice turn failed.');
     await Promise.all([loadJobs(), loadRateLimitMeta()]);
   }
   if (event.event === 'job.queued' || event.event === 'job.started' || event.event === 'job.codex.started') {
@@ -1116,6 +1125,43 @@ function logRealtimeDiagnostic(phase, data = {}, level = 'info', detail = null) 
   }).catch(() => {});
 }
 
+async function sendVoiceTranscriptToHermes(transcript, itemId = null) {
+  const content = String(transcript || '').trim();
+  if (!currentChat || !content) return;
+  setVoiceStatus('Sending voice transcript to Hermes…');
+  logRealtimeDiagnostic('voice.transcript_to_hermes', {item_id: itemId, length: content.length});
+  const res = await fetch(apiUrl(`/api/conversations/${currentChat}/messages`), {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({content}),
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail = payload.detail?.message || payload.detail || 'failed to send transcript to Hermes';
+    logRealtimeDiagnostic('voice.transcript_to_hermes.failed', {status: res.status}, 'error', detail);
+    setVoiceStatus(`Hermes voice send failed: ${detail}`);
+    return;
+  }
+  if (payload.run_id) pendingVoiceRunIds.add(payload.run_id);
+  setVoiceStatus('Hermes is thinking…');
+}
+
+function speakHermesResponseWithRealtime(content, runId = null) {
+  const text = String(content || '').trim();
+  const channel = voiceSession?.dataChannel;
+  if (!text || !channel || channel.readyState !== 'open') return false;
+  logRealtimeDiagnostic('voice.hermes_response_to_audio', {run_id: runId, length: text.length});
+  channel.send(JSON.stringify({
+    type: 'response.create',
+    response: {
+      modalities: ['audio'],
+      instructions: `Read this Hermes response aloud naturally and exactly. Do not add new facts or commentary.\n\n${text}`,
+    },
+  }));
+  setVoiceStatus('Speaking Hermes response…');
+  return true;
+}
+
 function cleanupVoiceSession() {
   if (!voiceSession) return;
   const session = voiceSession;
@@ -1170,7 +1216,7 @@ async function startVoiceChat() {
     audioElement.style.display = 'none';
     document.body.appendChild(audioElement);
     const dataChannel = peerConnection.createDataChannel('oai-events');
-    voiceSession = {peerConnection, dataChannel, mediaStream, audioElement};
+    voiceSession = {peerConnection, dataChannel, mediaStream, audioElement, seenTranscriptItemIds: new Set()};
     peerConnection.ontrack = (event) => {
       logRealtimeDiagnostic('peer.ontrack', {streams: event.streams.length, track_kind: event.track?.kind});
       audioElement.srcObject = event.streams[0];
@@ -1194,15 +1240,18 @@ async function startVoiceChat() {
           model: 'gpt-realtime-2',
           output_modalities: ['audio'],
           audio: {
-            input: {turn_detection: {type: 'semantic_vad'}},
+            input: {
+              turn_detection: {type: 'semantic_vad', create_response: false},
+              transcription: {model: 'gpt-4o-mini-transcribe', language: 'en'},
+            },
             output: {voice: 'marin'},
           },
-          instructions: 'You are Hermes Tailchat in a live voice session. Speak clearly and briefly. Ask before taking actions outside conversation.',
+          instructions: 'You are Tailchat voice I/O. Transcribe the user and stay silent until Tailchat sends a Hermes response to read aloud.',
         },
       }));
       setVoiceStatus('Voice connected. Speak naturally; semantic VAD handles turn taking.');
     });
-    dataChannel.addEventListener('message', (event) => {
+    dataChannel.addEventListener('message', async (event) => {
       let payload;
       try {
         payload = JSON.parse(event.data);
@@ -1212,6 +1261,14 @@ async function startVoiceChat() {
       if (payload.type === 'error') {
         logRealtimeDiagnostic('data_channel.error_event', payload, 'error', payload.error?.message || 'Realtime voice error');
         setVoiceStatus(payload.error?.message || 'Realtime voice error');
+      }
+      if (payload.type === 'conversation.item.input_audio_transcription.completed') {
+        const transcript = payload.transcript || payload.item?.content?.map(part => part.transcript || part.text || '').join(' ') || '';
+        const itemId = payload.item_id || payload.item?.id || null;
+        if (!itemId || !voiceSession?.seenTranscriptItemIds?.has(itemId)) {
+          if (itemId) voiceSession?.seenTranscriptItemIds?.add(itemId);
+          await sendVoiceTranscriptToHermes(transcript, itemId);
+        }
       }
       if (payload.type === 'response.done') {
         logRealtimeDiagnostic('response.done', {type: payload.type, status: payload.response?.status, status_details: payload.response?.status_details});
