@@ -259,19 +259,70 @@ def test_realtime_client_secret_calls_openai_with_ephemeral_session_config(tmp_p
 
     assert response.status_code == 200
     assert response.json()["value"] == "ek_test"
-    assert response.json()["model"] == "gpt-realtime-2"
+    assert response.json()["model"] == "gpt-realtime-whisper"
     assert captured["url"] == "https://api.openai.com/v1/realtime/client_secrets"
     assert captured["headers"]["Authorization"] == "Bearer test-openai-key"
     assert captured["headers"]["OpenAI-Safety-Identifier"].startswith("tailchat-conversation-")
     assert len(captured["headers"]["OpenAI-Safety-Identifier"]) <= 64
     assert convo_id not in captured["headers"]["OpenAI-Safety-Identifier"]
-    assert captured["json"]["session"]["type"] == "realtime"
-    assert captured["json"]["session"]["model"] == "gpt-realtime-2"
-    assert captured["json"]["session"]["output_modalities"] == ["audio"]
-    assert captured["json"]["session"]["audio"]["input"]["turn_detection"]["create_response"] is False
-    assert captured["json"]["session"]["audio"]["input"]["transcription"]["model"] == "gpt-4o-mini-transcribe"
-    assert captured["json"]["session"]["audio"]["output"]["voice"] == "marin"
-    assert "Transcribe the user" in captured["json"]["session"]["instructions"]
+    assert captured["json"]["session"]["type"] == "transcription"
+    assert "model" not in captured["json"]["session"]
+    assert "output_modalities" not in captured["json"]["session"]
+    transcription = captured["json"]["session"]["audio"]["input"]["transcription"]
+    assert transcription["model"] == "gpt-realtime-whisper"
+    assert transcription["delay"] == "low"
+
+
+def test_realtime_speech_uses_latest_tts_model_and_hashed_safety_identifier(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    app, _db_path = load_app(tmp_path)
+    import app.main as main
+
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        content = b"fake-mp3"
+
+        def json(self):
+            return {}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, *, headers, json):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr(main.httpx, "AsyncClient", FakeAsyncClient)
+
+    with TestClient(app) as client:
+        created = client.post("/api/conversations", json={"title": "voice convo"})
+        convo_id = created.json()["id"]
+        response = client.post(
+            "/api/realtime/speech",
+            json={"conversation_id": convo_id, "content": "Hermes says hello", "voice": "marin"},
+        )
+
+    assert response.status_code == 200
+    assert response.content == b"fake-mp3"
+    assert response.headers["content-type"] == "audio/mpeg"
+    assert response.headers["x-openai-model"] == "gpt-4o-mini-tts"
+    assert captured["url"] == "https://api.openai.com/v1/audio/speech"
+    assert captured["headers"]["OpenAI-Safety-Identifier"].startswith("tailchat-conversation-")
+    assert convo_id not in captured["headers"]["OpenAI-Safety-Identifier"]
+    assert captured["json"]["model"] == "gpt-4o-mini-tts"
+    assert captured["json"]["voice"] == "marin"
+    assert captured["json"]["input"] == "Hermes says hello"
 
 
 def test_static_voice_bridge_posts_transcripts_to_hermes_and_speaks_completed_runs():
@@ -281,8 +332,9 @@ def test_static_voice_bridge_posts_transcripts_to_hermes_and_speaks_completed_ru
     assert "sendVoiceTranscriptToHermes" in static_html
     assert "/api/conversations/${currentChat}/messages" in static_html
     assert "pendingVoiceRunIds.add(payload.run_id)" in static_html
-    assert "speakHermesResponseWithRealtime(event.content || '', event.run_id)" in static_html
-    assert "create_response: false" in static_html
+    assert "speakHermesResponseWithTts(event.content || '', event.run_id)" in static_html
+    assert "gpt-realtime-whisper" in static_html
+    assert "/api/realtime/speech" in static_html
 
 
 def test_realtime_diagnostics_are_persisted_and_redacted(tmp_path: Path):

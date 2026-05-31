@@ -432,7 +432,7 @@
       <div class="section">
         <div class="meta">Realtime voice</div>
         <div class="voice-panel">
-          <div id="voiceStatus" class="meta">Disconnected. Uses OpenAI Realtime model gpt-realtime-2.</div>
+          <div id="voiceStatus" class="meta">Disconnected. Uses OpenAI realtime transcription plus Hermes plus OpenAI TTS.</div>
           <div class="voice-actions">
             <button id="voiceStart" class="secondary">Start voice</button>
             <button id="voiceStop" class="secondary" disabled>Stop</button>
@@ -975,7 +975,7 @@ async function applyEvent(event) {
     setStatus('idle');
     if (event.run_id && pendingVoiceRunIds.has(event.run_id)) {
       pendingVoiceRunIds.delete(event.run_id);
-      if (!speakHermesResponseWithRealtime(event.content || '', event.run_id)) {
+      if (!await speakHermesResponseWithTts(event.content || '', event.run_id)) {
         setVoiceStatus('Hermes responded; voice channel is not ready to speak it.');
       }
     }
@@ -1146,18 +1146,29 @@ async function sendVoiceTranscriptToHermes(transcript, itemId = null) {
   setVoiceStatus('Hermes is thinking…');
 }
 
-function speakHermesResponseWithRealtime(content, runId = null) {
+async function speakHermesResponseWithTts(content, runId = null) {
   const text = String(content || '').trim();
-  const channel = voiceSession?.dataChannel;
-  if (!text || !channel || channel.readyState !== 'open') return false;
-  logRealtimeDiagnostic('voice.hermes_response_to_audio', {run_id: runId, length: text.length});
-  channel.send(JSON.stringify({
-    type: 'response.create',
-    response: {
-      modalities: ['audio'],
-      instructions: `Read this Hermes response aloud naturally and exactly. Do not add new facts or commentary.\n\n${text}`,
-    },
-  }));
+  if (!currentChat || !text || !voiceSession?.audioElement) return false;
+  logRealtimeDiagnostic('voice.hermes_response_to_tts', {run_id: runId, length: text.length});
+  const res = await fetch(apiUrl('/api/realtime/speech'), {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({conversation_id: currentChat, content: text, voice: 'marin'}),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    const detail = error.detail || 'speech generation failed';
+    logRealtimeDiagnostic('voice.hermes_response_to_tts.failed', {status: res.status}, 'error', detail);
+    setVoiceStatus(`Hermes speech failed: ${detail}`);
+    return false;
+  }
+  const audioUrl = URL.createObjectURL(await res.blob());
+  const audioElement = voiceSession.audioElement;
+  if (audioElement.dataset.objectUrl) URL.revokeObjectURL(audioElement.dataset.objectUrl);
+  audioElement.dataset.objectUrl = audioUrl;
+  audioElement.srcObject = null;
+  audioElement.src = audioUrl;
+  await audioElement.play();
   setVoiceStatus('Speaking Hermes response…');
   return true;
 }
@@ -1172,7 +1183,10 @@ function cleanupVoiceSession() {
   if (session.mediaStream) {
     for (const track of session.mediaStream.getTracks()) track.stop();
   }
-  if (session.audioElement) session.audioElement.remove();
+  if (session.audioElement) {
+    if (session.audioElement.dataset.objectUrl) URL.revokeObjectURL(session.audioElement.dataset.objectUrl);
+    session.audioElement.remove();
+  }
   voiceStartEl.disabled = false;
   voiceStopEl.disabled = true;
 }
@@ -1236,17 +1250,12 @@ async function startVoiceChat() {
       dataChannel.send(JSON.stringify({
         type: 'session.update',
         session: {
-          type: 'realtime',
-          model: 'gpt-realtime-2',
-          output_modalities: ['audio'],
+          type: 'transcription',
           audio: {
             input: {
-              turn_detection: {type: 'semantic_vad', create_response: false},
-              transcription: {model: 'gpt-4o-mini-transcribe', language: 'en'},
+              transcription: {model: 'gpt-realtime-whisper', language: 'en', delay: 'low'},
             },
-            output: {voice: 'marin'},
           },
-          instructions: 'You are Tailchat voice I/O. Transcribe the user and stay silent until Tailchat sends a Hermes response to read aloud.',
         },
       }));
       setVoiceStatus('Voice connected. Speak naturally; semantic VAD handles turn taking.');
@@ -1313,7 +1322,7 @@ async function startVoiceChat() {
 
 function stopVoiceChat() {
   cleanupVoiceSession();
-  setVoiceStatus('Voice disconnected. Uses OpenAI Realtime model gpt-realtime-2.');
+  setVoiceStatus('Voice disconnected. Uses OpenAI realtime transcription plus Hermes plus OpenAI TTS.');
 }
 
 document.getElementById('newChat').onclick = newChat;

@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 import httpx
 from pydantic import BaseModel, Field
@@ -43,6 +43,12 @@ class MessageCreate(BaseModel):
 
 class RealtimeClientSecretCreate(BaseModel):
     conversation_id: str = Field(min_length=1)
+    voice: str = Field(default='marin', pattern='^[a-zA-Z0-9_-]+$')
+
+
+class RealtimeSpeechCreate(BaseModel):
+    conversation_id: str = Field(min_length=1)
+    content: str = Field(min_length=1, max_length=12000)
     voice: str = Field(default='marin', pattern='^[a-zA-Z0-9_-]+$')
 
 
@@ -95,7 +101,8 @@ poll_task: asyncio.Task | None = None
 startup_recovery_summary: dict[str, int] = {'runs': 0, 'jobs': 0, 'approvals': 0, 'messages': 0}
 active_run_tasks: dict[str, asyncio.Task] = {}
 active_job_tasks: dict[str, asyncio.Task] = {}
-REALTIME_MODEL = 'gpt-realtime-2'
+REALTIME_TRANSCRIPTION_MODEL = 'gpt-realtime-whisper'
+TTS_MODEL = 'gpt-4o-mini-tts'
 
 
 @asynccontextmanager
@@ -185,22 +192,15 @@ def _realtime_safety_identifier(conversation_id: str) -> str:
     return f'tailchat-conversation-{digest}'
 
 
-def _build_realtime_session_config(voice: str) -> dict:
+def _build_realtime_session_config(_voice: str) -> dict:
     return {
         'session': {
-            'type': 'realtime',
-            'model': REALTIME_MODEL,
-            'output_modalities': ['audio'],
+            'type': 'transcription',
             'audio': {
                 'input': {
-                    'turn_detection': {'type': 'semantic_vad', 'create_response': False},
-                    'transcription': {'model': 'gpt-4o-mini-transcribe', 'language': 'en'},
-                },
-                'output': {
-                    'voice': voice,
+                    'transcription': {'model': REALTIME_TRANSCRIPTION_MODEL, 'language': 'en', 'delay': 'low'},
                 },
             },
-            'instructions': 'You are Tailchat voice I/O. Transcribe the user and stay silent until Tailchat sends a Hermes response to read aloud.',
         }
     }
 
@@ -519,8 +519,49 @@ async def create_realtime_client_secret(body: RealtimeClientSecretCreate):
         detail = payload.get('error', {}).get('message') if isinstance(payload, dict) else None
         raise HTTPException(status_code=response.status_code, detail=detail or 'OpenAI Realtime client secret request failed')
     if isinstance(payload, dict):
-        payload.setdefault('model', REALTIME_MODEL)
+        payload.setdefault('model', REALTIME_TRANSCRIPTION_MODEL)
     return payload
+
+
+@app.post('/api/realtime/speech')
+async def create_realtime_speech(body: RealtimeSpeechCreate):
+    if not store.conversation_exists(body.conversation_id):
+        raise HTTPException(status_code=404, detail='conversation not found')
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=503, detail='OPENAI_API_KEY is not configured on the Tailchat server')
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=10.0)) as client:
+            response = await client.post(
+                'https://api.openai.com/v1/audio/speech',
+                headers={
+                    'Authorization': f'Bearer {OPENAI_API_KEY}',
+                    'Content-Type': 'application/json',
+                    'OpenAI-Safety-Identifier': _realtime_safety_identifier(body.conversation_id),
+                },
+                json={
+                    'model': TTS_MODEL,
+                    'voice': body.voice,
+                    'input': body.content,
+                    'instructions': 'Read the text naturally and clearly. Do not add commentary.',
+                    'response_format': 'mp3',
+                },
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f'OpenAI speech request failed: {exc}') from exc
+
+    if response.status_code >= 400:
+        detail = 'OpenAI speech request failed'
+        with suppress(Exception):
+            payload = response.json()
+            detail = payload.get('error', {}).get('message') or detail
+        raise HTTPException(status_code=response.status_code, detail=detail)
+
+    return Response(
+        content=response.content,
+        media_type='audio/mpeg',
+        headers={'X-OpenAI-Model': TTS_MODEL},
+    )
 
 
 @app.post('/api/realtime/diagnostics')
