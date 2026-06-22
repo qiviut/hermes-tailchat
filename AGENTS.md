@@ -111,11 +111,10 @@ then be extra conservative and document the security impact.
 
 Current intended merge model:
 - protected `main`
-- required checks
-- pull requests are the normal merge path
-- review is required before merge per `docs/policies/branch-protection-and-pr-flow.md`
-- Codex/Hermes sidecar review improves bead readiness but does not replace repository branch protection by itself
-- auto-merge permitted only after the required review and checks pass
+- required `quick-checks`
+- trusted in-repository branches are automatically fast-forwarded to `main` after branch CI passes
+- fork PRs must not execute privileged repo automation
+- PRs and sidecar reviews remain useful for non-trivial or collaborative slices, but the solo-maintainer fast path is branch → green CI → `main`
 
 Do not weaken this casually.
 If you change merge/security policy, update:

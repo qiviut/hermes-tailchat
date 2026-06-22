@@ -39,3 +39,53 @@ jobs:
 
       - name: Run smoke and UI regression tests
         run: pytest -q tests/test_smoke.py tests/test_traceability_and_mobile_layout.py
+
+  promote-to-main:
+    name: promote-to-main
+    needs: quick-checks
+    if: >-
+      github.event_name == 'push' &&
+      github.ref_type == 'branch' &&
+      github.ref_name != 'main' &&
+      !startsWith(github.ref_name, 'dependabot/') &&
+      !startsWith(github.ref_name, 'renovate/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    concurrency:
+      group: promote-main
+      cancel-in-progress: false
+
+    steps:
+      - name: Check out main with full history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.TAILCHAT_AUTOPROMOTE_TOKEN || github.token }}
+
+      - name: Fast-forward main to the verified branch commit
+        env:
+          BRANCH: ${{ github.ref_name }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git fetch --no-tags origin \
+            "+refs/heads/main:refs/remotes/origin/main" \
+            "+refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}"
+
+          actual_sha=$(git rev-parse "refs/remotes/origin/${BRANCH}")
+          if [[ "$actual_sha" != "$EXPECTED_SHA" ]]; then
+            echo "Branch moved while CI was running: expected $EXPECTED_SHA, found $actual_sha" >&2
+            exit 1
+          fi
+
+          git checkout main
+          git reset --hard origin/main
+          git merge --ff-only "$EXPECTED_SHA"
+          git push origin HEAD:main

@@ -73,10 +73,12 @@ Recommended additional sections:
 - Follow-up beads
 
 ### 5. CI checks are validation evidence
-Required checks should be attached to the PR and merge record.
+Required checks should be attached to the branch commit and therefore to the `main` fast-forward when trusted branch auto-promotion succeeds.
 
 At minimum, we want:
 - quick-checks
+
+The promotion job is also evidence: it records that `main` was advanced only after `quick-checks` passed and only by a fast-forward from the verified branch SHA.
 
 Later, we may add:
 - AI review summary

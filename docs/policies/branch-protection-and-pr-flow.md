@@ -5,15 +5,15 @@ Date: 2026-04-11
 
 ## Goal
 
-Ship quickly without letting untrusted pull requests execute privileged automation or letting `main` drift into an unreviewed integration branch.
+Ship quickly without letting untrusted pull requests execute privileged automation, while letting trusted in-repository branches promote themselves to `main` after the fast required checks pass.
 
 ## Core rules
 
-1. Do not commit directly to `main`.
-2. Use short-lived feature branches.
-3. Open a PR immediately after pushing meaningful work.
-4. Require review before merge.
-5. Use auto-merge only after GitHub protections and trusted checks are in place.
+1. Do not hand-edit `main`; work on short-lived feature branches.
+2. CI may automatically fast-forward `main` to a trusted branch commit after `quick-checks` passes.
+3. The auto-promotion path is branch-push only; it must not run for fork pull requests.
+4. If a branch is behind `main` or cannot fast-forward cleanly, rebase/update the branch rather than force-pushing `main`.
+5. Use PRs and sidecar review when they add useful review evidence, but the solo-maintainer fast path is trusted branch → green CI → `main`.
 
 ## User-specific trust model
 
@@ -29,19 +29,18 @@ This is stricter than the default "read-only token on pull_request is safe enoug
 
 ## Minimal GitHub settings to apply on `main`
 
-Once the first trusted check exists, configure branch protection for `main` with:
-- require a pull request before merging
-- require at least 1 approving review
+With trusted branch auto-promotion enabled, configure branch protection for `main` with:
 - require status checks to pass before merging
 - require branches to be up to date before merging
+- require the `quick-checks` status check
 - apply the rule to administrators too
 - disallow force-pushes
 - disallow branch deletion
-- allow auto-merge
-- prefer squash merge as the default merge style
+
+Do **not** require pull requests for every update if the trusted branch fast path is desired. The promotion job fast-forwards `main` from a branch commit that already has a passing `quick-checks` result.
 
 Optional later additions:
-- require conversation resolution
+- require conversation resolution for PR-based work
 - require linear history
 - require signed commits
 
@@ -65,22 +64,22 @@ Do not make the first required check depend on:
 ## Merge strategy for improving security over time
 
 Current default for this repo:
-- short-lived feature branches
+- short-lived trusted feature branches
 - protected `main`
-- required trusted checks
-- auto-merge after checks pass
-- squash merge by default
+- required trusted `quick-checks`
+- automatic fast-forward promotion from green in-repository branches to `main`
+- PRs and sidecar reviews when the change deserves extra review evidence
 
 Why this is the right current baseline:
 - fast iteration on a single-user project
-- clean `main` history
-- good fit for many small fixup commits
-- easier release-note and traceability grouping once PRs consistently list bead IDs
+- `main` only advances to commits that passed the required check
+- avoids privileged automation for fork PR code
+- preserves branch/commit/check traceability without turning every small slice into review ceremony
 
 Security reasoning:
-- squash merge is not itself the main security control
-- the security value comes from protected `main`, trusted CI, traceability, and a gradual increase in validation rigor
-- squash merge reduces history noise, which makes review and forensic reading of `main` easier in practice
+- the security value comes from protected `main`, trusted CI, traceability, and a clearly branch-push-only promotion job
+- the promotion job performs a fast-forward only; it does not resolve conflicts, force-push, or merge stale branches
+- fork PRs can be reviewed manually and copied into trusted branches when worth testing
 
 How to improve the strategy over time:
 1. keep required checks fast enough that developers do not route around them
@@ -99,14 +98,22 @@ This repo should get more secure by accumulating better evidence and safer autom
 
 ## Merge flow
 
-Normal flow:
+Trusted branch fast path:
+1. create branch from current `main`
+2. commit a small slice
+3. push branch
+4. CI runs `quick-checks`
+5. if checks pass and the branch can fast-forward from `main`, CI pushes that commit to `main`
+6. if promotion fails, update/rebase the branch and push again
+
+PR/review flow remains available for non-trivial or collaborative slices:
 1. create branch
 2. commit small slice
 3. push branch
-4. open PR immediately
-5. get review
+4. open PR with bead/test/security notes
+5. get review or sidecar review when useful
 6. let trusted checks pass
-7. merge via squash
+7. merge normally or let the branch auto-promote if it is still a clean fast-forward
 
 Helper script:
 
@@ -122,22 +129,24 @@ scripts/ship-pr.sh --arm-auto
 scripts/ship-pr.sh --merge-now
 ```
 
-## Auto-merge policy
+## Auto-promotion policy
 
-Auto-merge is acceptable only after:
-- branch protection is enabled
-- at least one trusted required check exists
-- review is required on `main`
+Trusted branch auto-promotion is acceptable because:
+- it only runs for `push` events on branches in this repository
+- fork pull requests do not run privileged promotion logic
+- the promotion job depends on `quick-checks`
+- `main` is updated with `git merge --ff-only`, never force-pushed
+- dependency bot branches are excluded until they have their own policy
 
-Before that, auto-merge is just convenience, not a security control.
+This is convenience plus a lightweight safety gate, not a substitute for human review on risky changes.
 
 ## Why this policy exists
 
 This policy is optimized for two goals at once:
-- frequent merges and fast shipping
+- frequent trusted-branch merges and fast shipping
 - no accidental privileged execution of untrusted PR code
 
 That means:
 - we accept a little manual friction for fork PRs
 - we optimize the happy path for trusted branches and small PRs
-- we keep `main` stable enough that fast auto-merge can become useful later
+- we keep `main` stable by requiring a green fast check and fast-forward-only promotion
