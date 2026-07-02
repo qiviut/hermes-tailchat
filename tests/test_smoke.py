@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import importlib.util
 import json
 import os
 import sys
 import types
 from pathlib import Path
 import time
+import warnings
 
 from fastapi.testclient import TestClient
 
@@ -151,6 +153,22 @@ def test_health_endpoint_works_from_root_and_hermes_prefix(tmp_path: Path):
         assert prefixed.json()["ok"] is True
         assert prefixed.json()["db_path"] == str(db_path)
 
+
+def test_testclient_uses_supported_httpx2_transport_without_starlette_warning(tmp_path: Path):
+    assert importlib.util.find_spec("httpx2") is not None
+    app, _db_path = load_app(tmp_path)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with TestClient(app) as client:
+            response = client.get("/health")
+
+    assert response.status_code == 200
+    warning_messages = [str(item.message) for item in caught]
+    assert not any(
+        "starlette.testclient" in message and "httpx2" in message
+        for message in warning_messages
+    )
 
 
 def test_conversation_routes_work_through_root_and_hermes_prefix(tmp_path: Path):
