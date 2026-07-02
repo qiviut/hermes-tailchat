@@ -30,6 +30,32 @@ if [[ "$FORCE_DEPLOY" != "1" && "$current_rev" == "$previous_rev" ]]; then
   exit 0
 fi
 
+# Clear stale Python bytecode cache in hermes-agent venv to prevent ImportError
+# after code updates (e.g. new functions added to modules)
+echo "→ Clearing stale Python bytecode cache..."
+python3 <<'PYEOF'
+import os, shutil
+hermes_root = os.path.expanduser('~/.hermes/hermes-agent')
+removed = 0
+for root, dirs, files in os.walk(hermes_root):
+    # Skip venv, .git, node_modules
+    dirs[:] = [d for d in dirs if d not in {'venv', '.venv', '.git', 'node_modules', '.worktrees'}]
+    if os.path.basename(root) == '__pycache__':
+        try:
+            shutil.rmtree(root)
+            removed += 1
+        except OSError:
+            pass
+    for f in files:
+        if f.endswith('.pyc'):
+            try:
+                os.unlink(os.path.join(root, f))
+            except OSError:
+                pass
+suffix = 'y' if removed == 1 else 'ies'
+print(f'  ✓ Cleared {removed} __pycache__ director{suffix}')
+PYEOF
+
 systemctl --user restart "$SERVICE_NAME"
 
 deadline=$((SECONDS + TIMEOUT_SECONDS))

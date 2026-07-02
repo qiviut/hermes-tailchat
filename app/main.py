@@ -203,7 +203,11 @@ def _build_realtime_session_config(voice: str) -> dict:
                 'Keep turn-taking natural: you may briefly acknowledge the user, say you are checking with Hermes, '
                 'or explain that Hermes is still working. Do not answer substantive user requests from your own knowledge. '
                 'For every substantive user request, call the run_hermes_turn tool with the user request. '
-                'After the tool returns, speak the Hermes output faithfully and do not add unrelated commentary.'
+                'After the tool returns, speak the Hermes output faithfully and do not add unrelated commentary. '
+                'CRITICAL: While waiting for the run_hermes_turn tool to return, YOU MUST generate audio that narrates your progress continuously — '
+                'e.g. "Let me check with Hermes about that...", "Hermes is searching now...", '
+                '"Still waiting for results...", "Almost there...". Do not stay silent during tool execution. '
+                'Speak until the tool result arrives, then deliver the final answer.'
             ),
             'audio': {
                 'input': {
@@ -212,6 +216,11 @@ def _build_realtime_session_config(voice: str) -> dict:
                 'output': {'voice': voice},
             },
             'output_modalities': ['audio'],
+            'turn_detection': {
+                'type': 'semantic_vad',
+                'eagerness': 'medium',
+                'create_response': True,
+            },
             'tools': [
                 {
                     'type': 'function',
