@@ -1,0 +1,18 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard"
+  ],
+  "rangeStrategy": "bump",
+  "major": {
+    "enabled": true
+  },
+  "packageRules": [
+    {
+      "description": "Automerge low-risk dependency refreshes once CI passes.",
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "automerge": true
+    }
+  ]
+}
